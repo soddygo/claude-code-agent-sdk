@@ -12,7 +12,8 @@ use std::path::Path;
 
 use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, HookContext, HookInput, HookJsonOutput,
-    HookSpecificOutput, Hooks, Message, PermissionMode, PreToolUseHookSpecificOutput, SyncHookJsonOutput,
+    HookSpecificOutput, Hooks, Message, PermissionMode, PreToolUseHookSpecificOutput,
+    SyncHookJsonOutput,
 };
 use futures::StreamExt;
 

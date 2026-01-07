@@ -332,7 +332,10 @@ async fn example_control_protocol() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(styles) = info.get("available_output_styles")
             && let Some(styles_array) = styles.as_array()
         {
-            let style_names: Vec<String> = styles_array.iter().filter_map(|s: &serde_json::Value| s.as_str().map(|s: &str| s.to_string())).collect();
+            let style_names: Vec<String> = styles_array
+                .iter()
+                .filter_map(|s: &serde_json::Value| s.as_str().map(|s: &str| s.to_string()))
+                .collect();
             println!("  - Available output styles: {}", style_names.join(", "));
         }
 
