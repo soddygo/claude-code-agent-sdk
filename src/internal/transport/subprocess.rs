@@ -563,6 +563,11 @@ impl Transport for SubprocessTransport {
         let args = self.build_command();
         let env = self.build_env();
 
+        tracing::info!(
+            "Spawning Claude CLI with args: {:?}",
+            args
+        );
+
         // Build command
         let mut cmd = Command::new(&self.cli_path);
         cmd.args(&args)
