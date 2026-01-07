@@ -438,12 +438,26 @@ impl SubprocessTransport {
             for (name, config) in servers {
                 match config {
                     crate::types::mcp::McpServerConfig::Sdk(sdk_config) => {
-                        // For SDK servers, only pass type: "sdk" (instance is not serializable)
+                        // Get tools from the SDK server
+                        let tools = sdk_config.instance.list_tools();
+                        let tools_json: Vec<serde_json::Value> = tools
+                            .iter()
+                            .map(|t| {
+                                serde_json::json!({
+                                    "name": t.name,
+                                    "description": t.description,
+                                    "inputSchema": t.input_schema
+                                })
+                            })
+                            .collect();
+
+                        // For SDK servers, pass type: "sdk" and include tools
                         mcp_servers_config.insert(
                             name.clone(),
                             serde_json::json!({
                                 "type": "sdk",
-                                "name": sdk_config.name
+                                "name": sdk_config.name,
+                                "tools": tools_json
                             }),
                         );
                     }

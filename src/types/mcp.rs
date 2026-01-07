@@ -137,11 +137,34 @@ pub struct McpSdkServerConfig {
     pub instance: Arc<dyn SdkMcpServer>,
 }
 
+/// Tool definition for SDK MCP servers (used in list_tools)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Tool name
+    pub name: String,
+    /// Tool description
+    pub description: String,
+    /// JSON schema for tool input
+    pub input_schema: serde_json::Value,
+}
+
 /// Trait for SDK MCP server implementations
 #[async_trait]
 pub trait SdkMcpServer: Send + Sync {
     /// Handle an MCP message
     async fn handle_message(&self, message: serde_json::Value) -> Result<serde_json::Value>;
+
+    /// List available tools
+    ///
+    /// This method is called during CLI argument building to include the tool
+    /// definitions in `--mcp-config`. This allows the CLI to know what tools
+    /// are available from this SDK server without having to call `tools/list`.
+    ///
+    /// The default implementation returns an empty list. Override this method
+    /// to provide the list of tools your server supports.
+    fn list_tools(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
 }
 
 /// Tool handler trait
@@ -279,6 +302,17 @@ impl SdkMcpServer for DefaultSdkMcpServer {
                 method
             ))),
         }
+    }
+
+    fn list_tools(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .map(|t| ToolDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+            })
+            .collect()
     }
 }
 
