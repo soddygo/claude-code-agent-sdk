@@ -9,6 +9,67 @@ use std::sync::Arc;
 
 use crate::errors::Result;
 
+// ============================================================================
+// ACP Tool Name Prefix Support
+// ============================================================================
+
+/// ACP tool name prefix for MCP server tools.
+///
+/// When using SDK MCP servers to replace CLI built-in tools, tools are registered
+/// with this prefix. For example, the `Bash` tool becomes `mcp__acp__Bash`.
+///
+/// This follows the MCP naming convention: `mcp__{server_name}__{tool_name}`
+pub const ACP_TOOL_PREFIX: &str = "mcp__acp__";
+
+/// Get the full MCP tool name with ACP prefix.
+///
+/// # Example
+///
+/// ```
+/// use claude_agent_sdk_rs::acp_tool_name;
+///
+/// assert_eq!(acp_tool_name("Bash"), "mcp__acp__Bash");
+/// assert_eq!(acp_tool_name("Read"), "mcp__acp__Read");
+/// ```
+pub fn acp_tool_name(tool_name: &str) -> String {
+    format!("{}{}", ACP_TOOL_PREFIX, tool_name)
+}
+
+/// Check if a tool name has the ACP prefix.
+///
+/// # Example
+///
+/// ```
+/// use claude_agent_sdk_rs::is_acp_tool;
+///
+/// assert!(is_acp_tool("mcp__acp__Bash"));
+/// assert!(!is_acp_tool("Bash"));
+/// ```
+pub fn is_acp_tool(tool_name: &str) -> bool {
+    tool_name.starts_with(ACP_TOOL_PREFIX)
+}
+
+/// Strip the ACP prefix from a tool name.
+///
+/// Returns the original tool name if the prefix is present, otherwise returns
+/// the input unchanged.
+///
+/// # Example
+///
+/// ```
+/// use claude_agent_sdk_rs::strip_acp_prefix;
+///
+/// assert_eq!(strip_acp_prefix("mcp__acp__Bash"), "Bash");
+/// assert_eq!(strip_acp_prefix("Bash"), "Bash");
+/// ```
+pub fn strip_acp_prefix(tool_name: &str) -> &str {
+    tool_name.strip_prefix(ACP_TOOL_PREFIX).unwrap_or(tool_name)
+}
+
+// ============================================================================
+// MCP Server Configuration
+// ============================================================================
+
 /// MCP servers configuration
 #[derive(Clone, Default)]
 pub enum McpServers {

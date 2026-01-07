@@ -409,3 +409,51 @@ pub struct SandboxSettings {
     #[builder(default, setter(strip_option))]
     pub enable_weaker_nested_sandbox: Option<bool>,
 }
+
+// ============================================================================
+// ClaudeAgentOptions Helper Methods
+// ============================================================================
+
+impl ClaudeAgentOptions {
+    /// Configure tools to use ACP MCP server instead of CLI built-in.
+    ///
+    /// This disables the CLI's built-in tools and enables the corresponding
+    /// MCP tools with the `mcp__acp__` prefix.
+    ///
+    /// When Claude needs to execute a tool like `Bash`, it will call
+    /// `mcp__acp__Bash` instead, which routes to your SDK MCP server.
+    ///
+    /// # Arguments
+    ///
+    /// * `tools` - List of tool names to replace (e.g., `["Bash", "Read", "Write"]`)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use claude_agent_sdk_rs::ClaudeAgentOptions;
+    ///
+    /// let mut options = ClaudeAgentOptions::builder().build();
+    /// options.use_acp_tools(&["Bash", "Read", "Write", "Edit"]);
+    ///
+    /// // Now options.disallowed_tools contains ["Bash", "Read", "Write", "Edit"]
+    /// // And options.allowed_tools contains ["mcp__acp__Bash", "mcp__acp__Read", ...]
+    /// ```
+    pub fn use_acp_tools(&mut self, tools: &[&str]) {
+        use super::mcp::acp_tool_name;
+
+        for tool in tools {
+            let tool_str = (*tool).to_string();
+
+            // Disable CLI built-in tool
+            if !self.disallowed_tools.contains(&tool_str) {
+                self.disallowed_tools.push(tool_str);
+            }
+
+            // Enable MCP tool with prefix
+            let mcp_name = acp_tool_name(tool);
+            if !self.allowed_tools.contains(&mcp_name) {
+                self.allowed_tools.push(mcp_name);
+            }
+        }
+    }
+}
