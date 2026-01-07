@@ -14,7 +14,7 @@
 //! 2. Session IDs are present and non-empty
 //! 3. The API accepts session_id parameters without errors
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, HookEvent, HookInput, HookJsonOutput, HookMatcher, Message,
     PermissionMode, SdkPluginConfig, SyncHookJsonOutput,
 };
@@ -822,7 +822,7 @@ fn test_cwd_is_file_error() {
 /// Test UserContentBlock serialization matches expected format
 #[test]
 fn test_user_content_block_serialization_format() {
-    use claude_agent_sdk_rs::UserContentBlock;
+    use claude_code_agent_sdk::UserContentBlock;
 
     // Test text block
     let text_block = UserContentBlock::text("What's in this image?");
@@ -849,7 +849,7 @@ fn test_user_content_block_serialization_format() {
 /// Test that empty content returns error immediately
 #[tokio::test]
 async fn test_query_with_content_empty_validation() {
-    use claude_agent_sdk_rs::{UserContentBlock, query_with_content};
+    use claude_code_agent_sdk::{UserContentBlock, query_with_content};
 
     let result = query_with_content(Vec::<UserContentBlock>::new(), None).await;
     assert!(result.is_err());
@@ -860,9 +860,15 @@ async fn test_query_with_content_empty_validation() {
 /// Test that empty content in streaming mode returns error immediately
 #[tokio::test]
 async fn test_query_stream_with_content_empty_validation() {
-    use claude_agent_sdk_rs::{UserContentBlock, query_stream_with_content};
+    use claude_code_agent_sdk::{UserContentBlock, errors::ClaudeError, query_stream_with_content};
+    use futures::Stream;
+    use std::pin::Pin;
 
-    let result = query_stream_with_content(Vec::<UserContentBlock>::new(), None).await;
+    #[allow(clippy::type_complexity)]
+    let result: Result<
+        Pin<Box<dyn Stream<Item = Result<claude_code_agent_sdk::Message, ClaudeError>> + Send>>,
+        ClaudeError,
+    > = query_stream_with_content(Vec::<UserContentBlock>::new(), None).await;
     assert!(result.is_err());
     // Use match to extract the error since the Ok type (Stream) doesn't implement Debug
     let err = match result {
@@ -875,14 +881,14 @@ async fn test_query_stream_with_content_empty_validation() {
 /// Test that ClaudeClient empty content validation works
 #[tokio::test]
 async fn test_client_query_with_content_empty_validation() {
-    use claude_agent_sdk_rs::{ClaudeAgentOptions, ClaudeClient, UserContentBlock};
+    use claude_code_agent_sdk::{ClaudeAgentOptions, ClaudeClient, UserContentBlock};
 
     let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
     // Note: We don't connect - this tests that validation happens before connection check
     // Actually, connection check happens first, so we need to test differently
 
     // Test with empty content - should fail at connection check first
-    let result = client
+    let result: Result<(), _> = client
         .query_with_content(Vec::<UserContentBlock>::new())
         .await;
     assert!(result.is_err());
@@ -892,7 +898,7 @@ async fn test_client_query_with_content_empty_validation() {
 /// Test image validation error cases
 #[test]
 fn test_image_validation_errors() {
-    use claude_agent_sdk_rs::UserContentBlock;
+    use claude_code_agent_sdk::UserContentBlock;
 
     // Invalid MIME type
     let result = UserContentBlock::image_base64("image/bmp", "data");
@@ -910,7 +916,7 @@ fn test_image_validation_errors() {
 #[tokio::test]
 #[ignore] // Requires Claude CLI with vision support
 async fn test_query_with_content_image_base64() -> anyhow::Result<()> {
-    use claude_agent_sdk_rs::{Message, UserContentBlock, query_with_content};
+    use claude_code_agent_sdk::{Message, UserContentBlock, query_with_content};
 
     // Minimal 1x1 red PNG image (base64 encoded)
     // This is a valid PNG that Claude can process
@@ -923,12 +929,12 @@ async fn test_query_with_content_image_base64() -> anyhow::Result<()> {
         UserContentBlock::image_base64("image/png", red_pixel_png)?,
     ];
 
-    let options = claude_agent_sdk_rs::ClaudeAgentOptions::builder()
+    let options = claude_code_agent_sdk::ClaudeAgentOptions::builder()
         .max_turns(1)
-        .permission_mode(claude_agent_sdk_rs::PermissionMode::BypassPermissions)
+        .permission_mode(claude_code_agent_sdk::PermissionMode::BypassPermissions)
         .build();
 
-    let messages = query_with_content(content, Some(options)).await?;
+    let messages: Vec<Message> = query_with_content(content, Some(options)).await?;
 
     // Should get at least a result message
     let has_result = messages.iter().any(|m| matches!(m, Message::Result(_)));
@@ -940,7 +946,7 @@ async fn test_query_with_content_image_base64() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore] // Requires Claude CLI
 async fn test_client_query_with_content_integration() -> anyhow::Result<()> {
-    use claude_agent_sdk_rs::{
+    use claude_code_agent_sdk::{
         ClaudeAgentOptions, ClaudeClient, Message, PermissionMode, UserContentBlock,
     };
     use futures::StreamExt;
