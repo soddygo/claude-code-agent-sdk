@@ -428,6 +428,57 @@ impl SubprocessTransport {
             args.push(dir.display().to_string());
         }
 
+        // Add MCP server configuration
+        // This tells CLI which MCP servers are SDK (in-process) servers
+        // so it knows to send mcp_message control requests to the SDK
+        if let crate::types::mcp::McpServers::Dict(ref servers) = self.options.mcp_servers {
+            let mut mcp_servers_config: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+
+            for (name, config) in servers {
+                match config {
+                    crate::types::mcp::McpServerConfig::Sdk(sdk_config) => {
+                        // For SDK servers, only pass type: "sdk" (instance is not serializable)
+                        mcp_servers_config.insert(
+                            name.clone(),
+                            serde_json::json!({
+                                "type": "sdk",
+                                "name": sdk_config.name
+                            }),
+                        );
+                    }
+                    crate::types::mcp::McpServerConfig::Stdio(stdio_config) => {
+                        mcp_servers_config.insert(
+                            name.clone(),
+                            serde_json::to_value(stdio_config).unwrap_or_default(),
+                        );
+                    }
+                    crate::types::mcp::McpServerConfig::Sse(sse_config) => {
+                        mcp_servers_config.insert(
+                            name.clone(),
+                            serde_json::to_value(sse_config).unwrap_or_default(),
+                        );
+                    }
+                    crate::types::mcp::McpServerConfig::Http(http_config) => {
+                        mcp_servers_config.insert(
+                            name.clone(),
+                            serde_json::to_value(http_config).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+
+            if !mcp_servers_config.is_empty() {
+                let mcp_config = serde_json::json!({
+                    "mcpServers": mcp_servers_config
+                });
+                let mcp_config_str = mcp_config.to_string();
+                tracing::info!("Adding MCP config for SDK servers: {}", mcp_config_str);
+                args.push("--mcp-config".to_string());
+                args.push(mcp_config_str);
+            }
+        }
+
         // Add extra args
         for (key, value) in &self.options.extra_args {
             args.push(format!("--{}", key));
