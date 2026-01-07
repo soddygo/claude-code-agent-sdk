@@ -11,7 +11,7 @@
 //! - API testing utilities
 //! - Code generation helpers
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, Message, PermissionMode, SdkPluginConfig,
 };
 use futures::StreamExt;
@@ -98,10 +98,10 @@ async fn main() -> anyhow::Result<()> {
 
                     for block in &msg.message.content {
                         match block {
-                            claude_agent_sdk_rs::ContentBlock::Text(text) => {
+                            claude_code_agent_sdk::ContentBlock::Text(text) => {
                                 println!("{}", text.text);
                             }
-                            claude_agent_sdk_rs::ContentBlock::ToolUse(tool) => {
+                            claude_code_agent_sdk::ContentBlock::ToolUse(tool) => {
                                 println!("  [Tool: {}]", tool.name);
                             }
                             _ => {}

@@ -18,7 +18,7 @@
 //! - When you need all messages collected for post-processing
 //! - Simpler code when memory isn't a concern
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ContentBlock, Message, PermissionMode, query_stream,
 };
 use futures::stream::StreamExt;
@@ -73,10 +73,10 @@ async fn main() -> anyhow::Result<()> {
                             println!("  Tool Result: {}", result.tool_use_id);
                             if let Some(ref content) = result.content {
                                 match content {
-                                    claude_agent_sdk_rs::ToolResultContent::Text(text) => {
+                                    claude_code_agent_sdk::ToolResultContent::Text(text) => {
                                         println!("    {}", text);
                                     }
-                                    claude_agent_sdk_rs::ToolResultContent::Blocks(blocks) => {
+                                    claude_code_agent_sdk::ToolResultContent::Blocks(blocks) => {
                                         println!("    {} blocks", blocks.len());
                                     }
                                 }
@@ -86,10 +86,10 @@ async fn main() -> anyhow::Result<()> {
                             println!("  Thinking: {} chars", thinking.thinking.len());
                         }
                         ContentBlock::Image(image) => match &image.source {
-                            claude_agent_sdk_rs::ImageSource::Base64 { media_type, .. } => {
+                            claude_code_agent_sdk::ImageSource::Base64 { media_type, .. } => {
                                 println!("  Image (base64): {}", media_type);
                             }
-                            claude_agent_sdk_rs::ImageSource::Url { url } => {
+                            claude_code_agent_sdk::ImageSource::Url { url } => {
                                 println!("  Image (url): {}", url);
                             }
                         },

@@ -17,7 +17,7 @@
 //! - Maximum base64 data: 15MB (results in ~20MB decoded)
 //! - Large images may timeout - consider resizing before encoding
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ContentBlock, Message, PermissionMode, UserContentBlock,
     query_stream_with_content, query_with_content,
 };

@@ -12,7 +12,7 @@
 //! cargo run --example 07_dynamic_control
 //! ```
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, Message, PermissionMode,
 };
 use futures::StreamExt;

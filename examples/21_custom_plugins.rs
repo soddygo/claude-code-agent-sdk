@@ -15,9 +15,10 @@
 //! - Extend Claude's capabilities with organization-specific features
 //! - Package reusable functionality for multiple projects
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ContentBlock, Message, PermissionMode, SdkPluginConfig, query,
 };
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -141,7 +142,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("\nExample configurations:");
     for (i, plugin) in path_examples.iter().enumerate() {
-        println!("  {}. {:?}", i + 1, plugin.path().unwrap());
+        let path: &PathBuf = plugin.path().unwrap();
+        println!("  {}. {:?}", i + 1, path);
     }
 
     println!("\n=== Plugin Development Guide ===\n");

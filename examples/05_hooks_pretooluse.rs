@@ -10,9 +10,9 @@
 
 use std::path::Path;
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, HookContext, HookInput, HookJsonOutput,
-    HookSpecificOutput, Hooks, Message, PreToolUseHookSpecificOutput, SyncHookJsonOutput,
+    HookSpecificOutput, Hooks, Message, PermissionMode, PreToolUseHookSpecificOutput, SyncHookJsonOutput,
 };
 use futures::StreamExt;
 
@@ -70,7 +70,7 @@ async fn block_dangerous_bash(
             let command = pre_tool
                 .tool_input
                 .get("command")
-                .and_then(|v| v.as_str())
+                .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or("");
 
             // Block dangerous commands
@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
 
     let options = ClaudeAgentOptions::builder()
         .allowed_tools(vec!["Write".to_string(), "Bash".to_string()])
-        .permission_mode(claude_agent_sdk_rs::PermissionMode::AcceptEdits)
+        .permission_mode(PermissionMode::AcceptEdits)
         .cwd(Path::new("./fixtures"))
         .hooks(hooks.build())
         .build();

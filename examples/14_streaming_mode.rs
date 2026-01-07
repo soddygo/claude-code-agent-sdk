@@ -12,7 +12,7 @@
 //! cargo run --example 14_streaming_mode all - Run all examples
 //! cargo run --example 14_streaming_mode basic_streaming - Run a specific example
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, Message, ToolResultContent,
 };
 use futures::StreamExt;
@@ -315,7 +315,7 @@ async fn example_control_protocol() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Get server initialization info
     println!("1. Getting server info...");
-    let server_info = client.get_server_info().await;
+    let server_info: Option<serde_json::Value> = client.get_server_info().await;
 
     if let Some(info) = server_info {
         println!("✓ Server info retrieved successfully!");
@@ -332,7 +332,7 @@ async fn example_control_protocol() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(styles) = info.get("available_output_styles")
             && let Some(styles_array) = styles.as_array()
         {
-            let style_names: Vec<_> = styles_array.iter().filter_map(|s| s.as_str()).collect();
+            let style_names: Vec<String> = styles_array.iter().filter_map(|s: &serde_json::Value| s.as_str().map(|s: &str| s.to_string())).collect();
             println!("  - Available output styles: {}", style_names.join(", "));
         }
 

@@ -12,7 +12,7 @@
 //!   cargo run --example 15_hooks_comprehensive all           # Run all examples
 //!   cargo run --example 15_hooks_comprehensive PreToolUse    # Run specific example
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, ContentBlock, HookContext, HookEvent, HookInput,
     HookJsonOutput, HookMatcher, HookSpecificOutput, Message, PostToolUseHookSpecificOutput,
     PreToolUseHookSpecificOutput, SyncHookJsonOutput, UserPromptSubmitHookSpecificOutput,

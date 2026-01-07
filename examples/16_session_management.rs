@@ -7,7 +7,7 @@
 //!
 //! Run with: cargo run --example 16_session_management
 
-use claude_agent_sdk_rs::{ClaudeAgentOptions, ClaudeClient, ContentBlock, Message};
+use claude_code_agent_sdk::{ClaudeAgentOptions, ClaudeClient, ContentBlock, Message};
 use futures::StreamExt;
 
 #[tokio::main]

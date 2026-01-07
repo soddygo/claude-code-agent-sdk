@@ -7,7 +7,7 @@
 //! 2. Enable debug mode to see CLI internal messages
 //! 3. Filter and process stderr messages
 
-use claude_agent_sdk_rs::{ClaudeAgentOptions, ContentBlock, Message, query};
+use claude_code_agent_sdk::{ClaudeAgentOptions, ContentBlock, Message, query};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

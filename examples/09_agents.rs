@@ -8,7 +8,7 @@
 //! 2. Shows how to configure agents with specific tools and prompts
 //! 3. Demonstrates using multiple agents in a single session
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     AgentDefinition, AgentModel, ClaudeAgentOptions, ContentBlock, Message, SettingSource, query,
 };
 use std::collections::HashMap;

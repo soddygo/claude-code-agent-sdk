@@ -19,7 +19,7 @@
 //! cargo run --example 11_setting_sources -- project_and_user
 //! cargo run --example 11_setting_sources -- all
 
-use claude_agent_sdk_rs::{
+use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, Message, SettingSource, SystemMessage,
 };
 use futures::StreamExt;
@@ -204,7 +204,7 @@ fn extract_slash_commands(msg: &SystemMessage) -> Vec<String> {
     {
         return arr
             .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter_map(|v: &serde_json::Value| v.as_str().map(|s: &str| s.to_string()))
             .collect();
     }
     Vec::new()

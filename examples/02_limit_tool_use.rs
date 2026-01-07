@@ -9,7 +9,7 @@
 //! 2. Only allows the Write tool (not Edit)
 //! 3. Shows that Claude can create files but cannot edit them
 
-use claude_agent_sdk_rs::{ClaudeAgentOptions, ContentBlock, Message, query};
+use claude_code_agent_sdk::{ClaudeAgentOptions, ContentBlock, Message, PermissionMode, query};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     // Configure options to only allow Write tool
     let options = ClaudeAgentOptions {
         allowed_tools: vec!["Write".to_string()],
-        permission_mode: Some(claude_agent_sdk_rs::PermissionMode::AcceptEdits),
+        permission_mode: Some(PermissionMode::AcceptEdits),
         max_turns: Some(3),
         ..Default::default()
     };
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     let options2 = ClaudeAgentOptions {
         allowed_tools: vec!["Write".to_string(), "Read".to_string()],
         disallowed_tools: vec!["Edit".to_string()],
-        permission_mode: Some(claude_agent_sdk_rs::PermissionMode::AcceptEdits),
+        permission_mode: Some(PermissionMode::AcceptEdits),
         max_turns: Some(3),
         ..Default::default()
     };

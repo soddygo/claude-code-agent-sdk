@@ -8,7 +8,7 @@
 //! 2. Saves it to ./fixtures/hello.py
 //! 3. Runs the script to verify it works
 
-use claude_agent_sdk_rs::{ClaudeAgentOptions, ContentBlock, Message, query};
+use claude_code_agent_sdk::{ClaudeAgentOptions, ContentBlock, Message, PermissionMode, query};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     // Configure options to allow Write tool using the builder pattern
     let options = ClaudeAgentOptions::builder()
         .allowed_tools(vec!["Write".to_string()])
-        .permission_mode(claude_agent_sdk_rs::PermissionMode::AcceptEdits)
+        .permission_mode(PermissionMode::AcceptEdits)
         .max_turns(5)
         .stderr_callback(std::sync::Arc::new(|msg| {
             eprintln!("STDERR: {}", msg);
