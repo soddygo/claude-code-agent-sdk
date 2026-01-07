@@ -246,8 +246,8 @@ pub use types::{
     config::*,
     hooks::*,
     mcp::{
-        McpServerConfig, McpServers, SdkMcpServer, SdkMcpTool, ToolDefinition, ToolHandler,
-        ToolResult, ToolResultContent as McpToolResultContent, create_sdk_mcp_server,
+        McpServerConfig, McpServers, SdkMcpServer, SdkMcpTool, ToolDefinition, ToolHandler, ToolResult,
+        ToolResultContent as McpToolResultContent, create_sdk_mcp_server,
         // ACP tool name prefix support
         ACP_TOOL_PREFIX, acp_tool_name, is_acp_tool, strip_acp_prefix,
     },

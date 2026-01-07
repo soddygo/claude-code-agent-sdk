@@ -17,6 +17,7 @@ use crate::errors::{
 };
 use crate::types::config::ClaudeAgentOptions;
 use crate::types::messages::UserContentBlock;
+use crate::types::mcp::{McpServerConfig, McpServers};
 use crate::version::{
     ENTRYPOINT, MIN_CLI_VERSION, SDK_VERSION, SKIP_VERSION_CHECK_ENV, check_version,
 };
@@ -428,71 +429,6 @@ impl SubprocessTransport {
             args.push(dir.display().to_string());
         }
 
-        // Add MCP server configuration
-        // This tells CLI which MCP servers are SDK (in-process) servers
-        // so it knows to send mcp_message control requests to the SDK
-        if let crate::types::mcp::McpServers::Dict(ref servers) = self.options.mcp_servers {
-            let mut mcp_servers_config: std::collections::HashMap<String, serde_json::Value> =
-                std::collections::HashMap::new();
-
-            for (name, config) in servers {
-                match config {
-                    crate::types::mcp::McpServerConfig::Sdk(sdk_config) => {
-                        // Get tools from the SDK server
-                        let tools = sdk_config.instance.list_tools();
-                        let tools_json: Vec<serde_json::Value> = tools
-                            .iter()
-                            .map(|t| {
-                                serde_json::json!({
-                                    "name": t.name,
-                                    "description": t.description,
-                                    "inputSchema": t.input_schema
-                                })
-                            })
-                            .collect();
-
-                        // For SDK servers, pass type: "sdk" and include tools
-                        mcp_servers_config.insert(
-                            name.clone(),
-                            serde_json::json!({
-                                "type": "sdk",
-                                "name": sdk_config.name,
-                                "tools": tools_json
-                            }),
-                        );
-                    }
-                    crate::types::mcp::McpServerConfig::Stdio(stdio_config) => {
-                        mcp_servers_config.insert(
-                            name.clone(),
-                            serde_json::to_value(stdio_config).unwrap_or_default(),
-                        );
-                    }
-                    crate::types::mcp::McpServerConfig::Sse(sse_config) => {
-                        mcp_servers_config.insert(
-                            name.clone(),
-                            serde_json::to_value(sse_config).unwrap_or_default(),
-                        );
-                    }
-                    crate::types::mcp::McpServerConfig::Http(http_config) => {
-                        mcp_servers_config.insert(
-                            name.clone(),
-                            serde_json::to_value(http_config).unwrap_or_default(),
-                        );
-                    }
-                }
-            }
-
-            if !mcp_servers_config.is_empty() {
-                let mcp_config = serde_json::json!({
-                    "mcpServers": mcp_servers_config
-                });
-                let mcp_config_str = mcp_config.to_string();
-                tracing::info!("Adding MCP config for SDK servers: {}", mcp_config_str);
-                args.push("--mcp-config".to_string());
-                args.push(mcp_config_str);
-            }
-        }
-
         // Add extra args
         for (key, value) in &self.options.extra_args {
             args.push(format!("--{}", key));
@@ -500,6 +436,24 @@ impl SubprocessTransport {
                 args.push(v.clone());
             }
         }
+
+        // Add MCP config for SDK servers
+        if let McpServers::Dict(servers) = &self.options.mcp_servers {
+            let mcp_config = build_mcp_config(servers);
+            if !mcp_config.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                args.push("--mcp-config".to_string());
+                if let Ok(config_str) = serde_json::to_string(&mcp_config) {
+                    tracing::info!("MCP config: {}", config_str);
+                    args.push(config_str);
+                }
+            } else {
+                tracing::warn!("MCP config is empty, no SDK servers registered");
+            }
+        } else {
+            tracing::debug!("No MCP servers configured (not a Dict)");
+        }
+
+        tracing::info!("CLI args: {:?}", args);
 
         args
     }
@@ -627,11 +581,6 @@ impl Transport for SubprocessTransport {
         // Build command
         let args = self.build_command();
         let env = self.build_env();
-
-        tracing::info!(
-            "Spawning Claude CLI with args: {:?}",
-            args
-        );
 
         // Build command
         let mut cmd = Command::new(&self.cli_path);
@@ -843,4 +792,74 @@ impl Drop for SubprocessTransport {
             let _ = process.start_kill();
         }
     }
+}
+
+/// Build MCP config JSON for CLI --mcp-config argument
+///
+/// This converts MCP server configurations to JSON format that Claude CLI understands.
+/// For SDK servers, it includes tool definitions so CLI knows what tools are available.
+fn build_mcp_config(servers: &HashMap<String, McpServerConfig>) -> serde_json::Value {
+    let mut config = serde_json::Map::new();
+
+    for (name, server_config) in servers {
+        match server_config {
+            McpServerConfig::Sdk(sdk) => {
+                // Get tools from SDK server instance
+                let tools = sdk.instance.list_tools();
+                let tools_json: Vec<_> = tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "inputSchema": t.input_schema
+                        })
+                    })
+                    .collect();
+
+                config.insert(
+                    name.clone(),
+                    serde_json::json!({
+                        "type": "sdk",
+                        "tools": tools_json
+                    }),
+                );
+            }
+            McpServerConfig::Stdio(stdio) => {
+                let mut entry = serde_json::json!({
+                    "type": "stdio",
+                    "command": stdio.command
+                });
+                if let Some(args) = &stdio.args {
+                    entry["args"] = serde_json::json!(args);
+                }
+                if let Some(env) = &stdio.env {
+                    entry["env"] = serde_json::json!(env);
+                }
+                config.insert(name.clone(), entry);
+            }
+            McpServerConfig::Sse(sse) => {
+                let mut entry = serde_json::json!({
+                    "type": "sse",
+                    "url": sse.url
+                });
+                if let Some(headers) = &sse.headers {
+                    entry["headers"] = serde_json::json!(headers);
+                }
+                config.insert(name.clone(), entry);
+            }
+            McpServerConfig::Http(http) => {
+                let mut entry = serde_json::json!({
+                    "type": "http",
+                    "url": http.url
+                });
+                if let Some(headers) = &http.headers {
+                    entry["headers"] = serde_json::json!(headers);
+                }
+                config.insert(name.clone(), entry);
+            }
+        }
+    }
+
+    serde_json::Value::Object(config)
 }
