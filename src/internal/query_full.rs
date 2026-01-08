@@ -677,3 +677,321 @@ impl QueryFull {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::permissions::{PermissionResultAllow, PermissionResultDeny};
+    use futures::future::BoxFuture;
+
+    // Helper to create IncomingControlRequest
+    fn make_control_request(request_data: serde_json::Value) -> IncomingControlRequest {
+        IncomingControlRequest {
+            type_: "control_request".to_string(),
+            request_id: "test_req_1".to_string(),
+            request: request_data,
+        }
+    }
+
+    // Helper to create a can_use_tool callback that always allows
+    fn allow_callback() -> CanUseToolCallback {
+        Arc::new(|_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
+            Box::pin(async move {
+                PermissionResult::Allow(PermissionResultAllow {
+                    updated_input: None,
+                    updated_permissions: None,
+                })
+            })
+        })
+    }
+
+    // Helper to create a can_use_tool callback that always denies
+    fn deny_callback() -> CanUseToolCallback {
+        Arc::new(|_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
+            Box::pin(async move {
+                PermissionResult::Deny(PermissionResultDeny {
+                    message: "User denied".to_string(),
+                    interrupt: true,
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_can_use_tool_with_allow_callback() {
+        let request = make_control_request(json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls -la"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(Some(allow_callback())));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["behavior"], "allow");
+    }
+
+    #[tokio::test]
+    async fn test_can_use_tool_with_deny_callback() {
+        let request = make_control_request(json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(Some(deny_callback())));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["behavior"], "deny");
+        assert_eq!(value["message"], "User denied");
+        assert_eq!(value["interrupt"], true);
+    }
+
+    #[tokio::test]
+    async fn test_can_use_tool_without_callback_denies_by_default() {
+        let request = make_control_request(json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool: Arc<Mutex<Option<CanUseToolCallback>>> = Arc::new(Mutex::new(None));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["behavior"], "deny");
+        assert_eq!(value["message"], "No permission callback registered");
+        assert_eq!(value["interrupt"], false);
+    }
+
+    #[tokio::test]
+    async fn test_can_use_tool_missing_tool_name() {
+        let request = make_control_request(json!({
+            "subtype": "can_use_tool",
+            // Missing tool_name
+            "tool_input": {"command": "ls"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(Some(allow_callback())));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Missing tool_name"));
+    }
+
+    #[tokio::test]
+    async fn test_can_use_tool_with_updated_input() {
+        let callback: CanUseToolCallback = Arc::new(|_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
+            Box::pin(async move {
+                PermissionResult::Allow(PermissionResultAllow {
+                    updated_input: Some(json!({"command": "ls -la --safe"})),
+                    updated_permissions: None,
+                })
+            })
+        });
+
+        let request = make_control_request(json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(Some(callback)));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["behavior"], "allow");
+        assert_eq!(value["updatedInput"]["command"], "ls -la --safe");
+    }
+
+    #[tokio::test]
+    async fn test_missing_subtype_returns_error() {
+        let request = make_control_request(json!({
+            // Missing subtype
+            "tool_name": "Bash"
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(None));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Missing subtype"));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_subtype_returns_error() {
+        let request = make_control_request(json!({
+            "subtype": "unknown_subtype"
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(None));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Unsupported control request subtype"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_message_missing_server_name() {
+        let request = make_control_request(json!({
+            "subtype": "mcp_message",
+            // Missing server_name
+            "message": {"method": "initialize"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(None));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Missing server_name"));
+    }
+
+    #[tokio::test]
+    async fn test_hook_callback_missing_callback_id() {
+        let request = make_control_request(json!({
+            "subtype": "hook_callback",
+            // Missing callback_id
+            "input": {}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(None));
+
+        let result = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Missing callback_id"));
+    }
+
+    #[tokio::test]
+    async fn test_can_use_tool_receives_tool_name_and_input() {
+        // Verify the callback receives correct parameters
+        let received_tool_name = Arc::new(Mutex::new(String::new()));
+        let received_input = Arc::new(Mutex::new(json!(null)));
+
+        let tool_name_clone = Arc::clone(&received_tool_name);
+        let input_clone = Arc::clone(&received_input);
+
+        let callback: CanUseToolCallback = Arc::new(move |tool_name, input, _context| {
+            let tool_name_inner = Arc::clone(&tool_name_clone);
+            let input_inner = Arc::clone(&input_clone);
+            Box::pin(async move {
+                *tool_name_inner.lock().await = tool_name;
+                *input_inner.lock().await = input;
+                PermissionResult::Allow(PermissionResultAllow::default())
+            })
+        });
+
+        let request = make_control_request(json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Write",
+            "tool_input": {"path": "/tmp/test.txt", "content": "hello"}
+        }));
+
+        let hook_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let sdk_mcp_servers = Arc::new(Mutex::new(HashMap::new()));
+        let can_use_tool = Arc::new(Mutex::new(Some(callback)));
+
+        let _ = QueryFull::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        assert_eq!(*received_tool_name.lock().await, "Write");
+        assert_eq!(received_input.lock().await["path"], "/tmp/test.txt");
+        assert_eq!(received_input.lock().await["content"], "hello");
+    }
+}
