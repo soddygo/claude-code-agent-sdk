@@ -162,6 +162,11 @@ impl ClaudeClient {
             };
         query.set_sdk_mcp_servers(sdk_mcp_servers).await;
 
+        // Set can_use_tool callback if provided
+        if let Some(ref callback) = self.options.can_use_tool {
+            query.set_can_use_tool(Some(Arc::clone(callback))).await;
+        }
+
         // Convert hooks to internal format
         let hooks = self.options.hooks.as_ref().map(|hooks_map| {
             hooks_map

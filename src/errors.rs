@@ -42,6 +42,10 @@ pub enum ClaudeError {
     #[error("Image validation error: {0}")]
     ImageValidation(#[from] ImageValidationError),
 
+    /// MCP error with JSONRPC error code
+    #[error("MCP error: {0}")]
+    Mcp(#[from] McpError),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -165,6 +169,41 @@ impl ImageValidationError {
         Self {
             message: message.into(),
         }
+    }
+}
+
+/// MCP (Model Context Protocol) error with JSONRPC error code
+#[derive(Debug, Error)]
+#[error("MCP error ({code}): {message}")]
+pub struct McpError {
+    /// JSONRPC error code
+    pub code: i32,
+    /// Error message
+    pub message: String,
+}
+
+impl McpError {
+    /// Create a new MCP error
+    pub fn new(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Method not found error (-32601)
+    pub fn method_not_found(method: &str) -> Self {
+        Self::new(-32601, format!("Method not found: {}", method))
+    }
+
+    /// Internal error (-32603)
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::new(-32603, message)
+    }
+
+    /// Invalid params error (-32602)
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(-32602, message)
     }
 }
 

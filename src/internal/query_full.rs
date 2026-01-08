@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use crate::errors::{ClaudeError, Result};
 use crate::types::hooks::{HookCallback, HookContext, HookInput, HookMatcher};
 use crate::types::mcp::McpSdkServerConfig;
+use crate::types::permissions::{CanUseToolCallback, ToolPermissionContext, PermissionResult, PermissionResultDeny};
 
 use super::transport::Transport;
 
@@ -57,6 +58,7 @@ pub struct QueryFull {
     pub(crate) transport: Arc<Mutex<Box<dyn Transport>>>,
     hook_callbacks: Arc<Mutex<HashMap<String, HookCallback>>>,
     sdk_mcp_servers: Arc<Mutex<HashMap<String, McpSdkServerConfig>>>,
+    can_use_tool: Arc<Mutex<Option<CanUseToolCallback>>>,
     next_callback_id: Arc<AtomicU64>,
     request_counter: Arc<AtomicU64>,
     pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
@@ -77,6 +79,7 @@ impl QueryFull {
             transport: Arc::new(Mutex::new(transport)),
             hook_callbacks: Arc::new(Mutex::new(HashMap::new())),
             sdk_mcp_servers: Arc::new(Mutex::new(HashMap::new())),
+            can_use_tool: Arc::new(Mutex::new(None)),
             next_callback_id: Arc::new(AtomicU64::new(0)),
             request_counter: Arc::new(AtomicU64::new(0)),
             pending_responses: Arc::new(Mutex::new(HashMap::new())),
@@ -90,6 +93,11 @@ impl QueryFull {
     /// Set stdin for direct write access (called from client after transport is connected)
     pub fn set_stdin(&mut self, stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>) {
         self.stdin = Some(stdin);
+    }
+
+    /// Set can_use_tool callback for permission handling
+    pub async fn set_can_use_tool(&self, callback: Option<CanUseToolCallback>) {
+        *self.can_use_tool.lock().await = callback;
     }
 
     /// Set SDK MCP servers
@@ -160,6 +168,7 @@ impl QueryFull {
         let transport = Arc::clone(&self.transport);
         let hook_callbacks = Arc::clone(&self.hook_callbacks);
         let sdk_mcp_servers = Arc::clone(&self.sdk_mcp_servers);
+        let can_use_tool = Arc::clone(&self.can_use_tool);
         let pending_responses = Arc::clone(&self.pending_responses);
         let message_tx = self.message_tx.clone();
         let stdin = self.stdin.clone();
@@ -193,26 +202,55 @@ impl QueryFull {
                                 }
                             }
                             Some("control_request") => {
-                                // Handle incoming control request (e.g., hook callback, MCP message)
-                                if let Ok(request) = serde_json::from_value::<IncomingControlRequest>(
-                                    message.clone(),
-                                ) {
-                                    let stdin_clone = stdin.clone();
-                                    let hook_callbacks_clone = Arc::clone(&hook_callbacks);
-                                    let sdk_mcp_servers_clone = Arc::clone(&sdk_mcp_servers);
+                                // Handle incoming control request (e.g., hook callback, MCP message, can_use_tool)
+                                let stdin_clone = stdin.clone();
+                                let hook_callbacks_clone = Arc::clone(&hook_callbacks);
+                                let sdk_mcp_servers_clone = Arc::clone(&sdk_mcp_servers);
+                                let can_use_tool_clone = Arc::clone(&can_use_tool);
 
-                                    tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_control_request_with_stdin(
-                                            request,
-                                            stdin_clone,
-                                            hook_callbacks_clone,
-                                            sdk_mcp_servers_clone,
-                                        )
-                                        .await
-                                        {
-                                            eprintln!("Error handling control request: {}", e);
-                                        }
-                                    });
+                                // Try to parse the request
+                                match serde_json::from_value::<IncomingControlRequest>(message.clone()) {
+                                    Ok(request) => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_control_request_with_stdin(
+                                                request,
+                                                stdin_clone,
+                                                hook_callbacks_clone,
+                                                sdk_mcp_servers_clone,
+                                                can_use_tool_clone,
+                                            )
+                                            .await
+                                            {
+                                                // This error is from write_to_stdin failing, which means
+                                                // we can't communicate with CLI anyway
+                                                tracing::error!("Error handling control request: {}", e);
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        // Failed to parse request - still need to send error response
+                                        // Extract request_id from raw message if possible
+                                        let request_id = message
+                                            .get("request_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown")
+                                            .to_string();
+
+                                        let error_response = json!({
+                                            "type": "control_response",
+                                            "response": {
+                                                "subtype": "error",
+                                                "request_id": request_id,
+                                                "error": format!("Failed to parse control request: {}", e)
+                                            }
+                                        });
+
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::write_to_stdin(&stdin_clone, &error_response).await {
+                                                tracing::error!("Failed to send parse error response: {}", e);
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             _ => {
@@ -235,13 +273,65 @@ impl QueryFull {
     }
 
     /// Handle incoming control request from CLI (new version using stdin directly)
+    ///
+    /// This function ALWAYS sends a response back to CLI, even on errors.
+    /// This prevents CLI from hanging when errors occur.
     async fn handle_control_request_with_stdin(
         request: IncomingControlRequest,
         stdin: Option<Arc<Mutex<Option<tokio::process::ChildStdin>>>>,
         hook_callbacks: Arc<Mutex<HashMap<String, HookCallback>>>,
         sdk_mcp_servers: Arc<Mutex<HashMap<String, McpSdkServerConfig>>>,
+        can_use_tool: Arc<Mutex<Option<CanUseToolCallback>>>,
     ) -> Result<()> {
-        let request_id = request.request_id;
+        let request_id = request.request_id.clone();
+
+        // Try to process the request and send appropriate response
+        let result = Self::process_control_request(
+            request,
+            hook_callbacks,
+            sdk_mcp_servers,
+            can_use_tool,
+        )
+        .await;
+
+        // Build response based on result
+        let response = match result {
+            Ok(response_data) => {
+                // Success response
+                json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": response_data
+                    }
+                })
+            }
+            Err(e) => {
+                // Error response - still send back to CLI to prevent hanging
+                tracing::error!("Control request error: {}", e);
+                json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "error",
+                        "request_id": request_id,
+                        "error": e.to_string()
+                    }
+                })
+            }
+        };
+
+        // Send response back to CLI
+        Self::write_to_stdin(&stdin, &response).await
+    }
+
+    /// Process control request and return response data
+    async fn process_control_request(
+        request: IncomingControlRequest,
+        hook_callbacks: Arc<Mutex<HashMap<String, HookCallback>>>,
+        sdk_mcp_servers: Arc<Mutex<HashMap<String, McpSdkServerConfig>>>,
+        can_use_tool: Arc<Mutex<Option<CanUseToolCallback>>>,
+    ) -> Result<serde_json::Value> {
         let request_data = request.request;
 
         let subtype = request_data
@@ -249,7 +339,53 @@ impl QueryFull {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ClaudeError::ControlProtocol("Missing subtype".to_string()))?;
 
-        let response_data: serde_json::Value = match subtype {
+        match subtype {
+            "can_use_tool" => {
+                // Handle permission request from CLI
+                let tool_name = request_data
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ClaudeError::ControlProtocol("Missing tool_name for can_use_tool".to_string())
+                    })?;
+
+                let tool_input = request_data
+                    .get("tool_input")
+                    .cloned()
+                    .unwrap_or(json!({}));
+
+                // Parse suggestions if present
+                let suggestions = request_data
+                    .get("suggestions")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let context = ToolPermissionContext {
+                    signal: None,
+                    suggestions,
+                };
+
+                // Get the callback
+                let callback_guard = can_use_tool.lock().await;
+                if let Some(ref callback) = *callback_guard {
+                    // Call the permission callback
+                    let result = callback(tool_name.to_string(), tool_input, context).await;
+                    // Serialize the permission result
+                    serde_json::to_value(&result).map_err(|e| {
+                        ClaudeError::ControlProtocol(format!("Failed to serialize permission result: {}", e))
+                    })
+                } else {
+                    // No callback registered - deny by default with a message
+                    tracing::warn!("No can_use_tool callback registered, denying tool: {}", tool_name);
+                    let deny_result = PermissionResult::Deny(PermissionResultDeny {
+                        message: "No permission callback registered".to_string(),
+                        interrupt: false,
+                    });
+                    serde_json::to_value(&deny_result).map_err(|e| {
+                        ClaudeError::ControlProtocol(format!("Failed to serialize deny result: {}", e))
+                    })
+                }
+            }
             "hook_callback" => {
                 // Execute hook callback
                 let callback_id = request_data
@@ -285,7 +421,7 @@ impl QueryFull {
                 // Convert to JSON
                 serde_json::to_value(&hook_output).map_err(|e| {
                     ClaudeError::ControlProtocol(format!("Failed to serialize hook output: {}", e))
-                })?
+                })
             }
             "mcp_message" => {
                 // Handle SDK MCP message
@@ -306,31 +442,27 @@ impl QueryFull {
                     Self::handle_sdk_mcp_request(sdk_mcp_servers, server_name, mcp_message.clone())
                         .await?;
 
-                json!({"mcp_response": mcp_response})
+                Ok(json!({"mcp_response": mcp_response}))
             }
             _ => {
-                return Err(ClaudeError::ControlProtocol(format!(
+                Err(ClaudeError::ControlProtocol(format!(
                     "Unsupported control request subtype: {}",
                     subtype
-                )));
+                )))
             }
-        };
+        }
+    }
 
-        // Send success response
-        let response = json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": response_data
-            }
-        });
-
-        let response_str = serde_json::to_string(&response)
+    /// Write JSON response to CLI stdin
+    async fn write_to_stdin(
+        stdin: &Option<Arc<Mutex<Option<tokio::process::ChildStdin>>>>,
+        response: &serde_json::Value,
+    ) -> Result<()> {
+        let response_str = serde_json::to_string(response)
             .map_err(|e| ClaudeError::Transport(format!("Failed to serialize response: {}", e)))?;
 
         // Write directly to stdin (bypasses transport lock)
-        if let Some(ref stdin_arc) = stdin {
+        if let Some(stdin_arc) = stdin {
             let mut stdin_guard = stdin_arc.lock().await;
             if let Some(ref mut stdin_stream) = *stdin_guard {
                 use tokio::io::AsyncWriteExt;
@@ -498,6 +630,10 @@ impl QueryFull {
     }
 
     /// Handle SDK MCP request by routing to the appropriate server
+    ///
+    /// This function wraps the server's response in a proper JSONRPC 2.0 format,
+    /// as expected by the Claude CLI. The CLI sends mcp_message control requests
+    /// and expects JSONRPC responses with "jsonrpc", "id", and "result"/"error" fields.
     async fn handle_sdk_mcp_request(
         sdk_mcp_servers: Arc<Mutex<HashMap<String, McpSdkServerConfig>>>,
         server_name: &str,
@@ -508,11 +644,36 @@ impl QueryFull {
             ClaudeError::ControlProtocol(format!("SDK MCP server not found: {}", server_name))
         })?;
 
-        // Call the server's handle_message method
-        server_config
-            .instance
-            .handle_message(message)
-            .await
-            .map_err(|e| ClaudeError::ControlProtocol(format!("MCP server error: {}", e)))
+        // Extract request ID for JSONRPC response
+        let request_id = message.get("id").cloned();
+
+        // Call the server's handle_message method and wrap in JSONRPC format
+        match server_config.instance.handle_message(message).await {
+            Ok(result) => {
+                // Success: wrap in JSONRPC response format
+                Ok(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": result
+                }))
+            }
+            Err(e) => {
+                // Extract error code from McpError if available, otherwise use -32603
+                let (code, message) = match &e {
+                    ClaudeError::Mcp(mcp_err) => (mcp_err.code, mcp_err.message.clone()),
+                    _ => (-32603, e.to_string()),
+                };
+
+                // Error: return JSONRPC error format
+                Ok(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": code,
+                        "message": message
+                    }
+                }))
+            }
+        }
     }
 }

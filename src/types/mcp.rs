@@ -193,7 +193,8 @@ pub enum ToolResultContent {
     Image {
         /// Base64-encoded image data
         data: String,
-        /// MIME type
+        /// MIME type (serializes as mimeType to match Python SDK)
+        #[serde(rename = "mimeType")]
         mime_type: String,
     },
 }
@@ -257,6 +258,11 @@ impl SdkMcpServer for DefaultSdkMcpServer {
                     }
                 }))
             }
+            "notifications/initialized" => {
+                // Handle initialized notification - return empty result
+                // This is a notification, not a request, so we just acknowledge it
+                Ok(serde_json::json!({}))
+            }
             "tools/list" => {
                 // Return list of tools
                 let tools: Vec<_> = self
@@ -289,15 +295,17 @@ impl SdkMcpServer for DefaultSdkMcpServer {
 
                 let result = tool.handler.handle(arguments).await?;
 
+                // Use snake_case "is_error" to match Python SDK format
                 Ok(serde_json::json!({
                     "content": result.content,
-                    "isError": result.is_error
+                    "is_error": result.is_error
                 }))
             }
-            _ => Err(crate::errors::ClaudeError::Transport(format!(
-                "Unknown method: {}",
-                method
-            ))),
+            _ => {
+                // Return JSONRPC error for unknown methods (-32601 = Method not found)
+                // This matches Python SDK behavior
+                Err(crate::errors::McpError::method_not_found(method).into())
+            }
         }
     }
 
