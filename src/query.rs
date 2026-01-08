@@ -1,6 +1,6 @@
 //! Simple query function for one-shot interactions
 
-use crate::errors::Result;
+use crate::errors::{ClaudeError, Result};
 use crate::internal::client::InternalClient;
 use crate::internal::message_parser::MessageParser;
 use crate::internal::transport::subprocess::QueryPrompt;
@@ -10,10 +10,45 @@ use crate::types::messages::{Message, UserContentBlock};
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 
+/// Validate options for one-shot queries
+///
+/// One-shot queries don't support bidirectional control protocol features
+/// like `can_use_tool` callbacks or hooks. This function validates that
+/// incompatible options are not set.
+fn validate_oneshot_options(options: &ClaudeAgentOptions) -> Result<()> {
+    if options.can_use_tool.is_some() {
+        return Err(ClaudeError::InvalidConfig(
+            "can_use_tool callback is not supported in one-shot queries. \
+            Use ClaudeClient for bidirectional communication with permission callbacks."
+                .to_string(),
+        ));
+    }
+
+    if options.hooks.is_some() {
+        return Err(ClaudeError::InvalidConfig(
+            "hooks are not supported in one-shot queries. \
+            Use ClaudeClient for bidirectional communication with hook support."
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Query Claude Code for one-shot interactions.
 ///
 /// This function is ideal for simple, stateless queries where you don't need
 /// bidirectional communication or conversation management.
+///
+/// **Note:** This function does not support `can_use_tool` callbacks or hooks.
+/// For permission handling or hook support, use [`ClaudeClient`] instead.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - `options.can_use_tool` is set (use ClaudeClient instead)
+/// - `options.hooks` is set (use ClaudeClient instead)
+/// - Claude CLI cannot be found or started
 ///
 /// # Examples
 ///
@@ -47,6 +82,9 @@ pub async fn query(
     let query_prompt = QueryPrompt::Text(prompt.into());
     let opts = options.unwrap_or_default();
 
+    // Validate that incompatible options are not set
+    validate_oneshot_options(&opts)?;
+
     let client = InternalClient::new(query_prompt, opts)?;
     client.execute().await
 }
@@ -58,10 +96,20 @@ pub async fn query(
 /// This is more memory-efficient for large conversations and provides real-time
 /// message processing capabilities.
 ///
+/// **Note:** This function does not support `can_use_tool` callbacks or hooks.
+/// For permission handling or hook support, use [`ClaudeClient`] instead.
+///
 /// # Performance Comparison
 ///
 /// - **`query()`**: O(n) memory usage, waits for all messages before returning
 /// - **`query_stream()`**: O(1) memory per message, processes messages in real-time
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - `options.can_use_tool` is set (use ClaudeClient instead)
+/// - `options.hooks` is set (use ClaudeClient instead)
+/// - Claude CLI cannot be found or started
 ///
 /// # Examples
 ///
@@ -96,6 +144,9 @@ pub async fn query_stream(
     let query_prompt = QueryPrompt::Text(prompt.into());
     let opts = options.unwrap_or_default();
 
+    // Validate that incompatible options are not set
+    validate_oneshot_options(&opts)?;
+
     let mut transport = SubprocessTransport::new(query_prompt, opts)?;
     transport.connect().await?;
 
@@ -129,10 +180,15 @@ pub async fn query_stream(
 /// This function allows you to send mixed content including text and images
 /// to Claude. Use [`UserContentBlock`] to construct the content array.
 ///
+/// **Note:** This function does not support `can_use_tool` callbacks or hooks.
+/// For permission handling or hook support, use [`ClaudeClient`] instead.
+///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The content vector is empty (must include at least one text or image block)
+/// - `options.can_use_tool` is set (use ClaudeClient instead)
+/// - `options.hooks` is set (use ClaudeClient instead)
 /// - Claude CLI cannot be found or started
 /// - The query execution fails
 ///
@@ -168,12 +224,15 @@ pub async fn query_with_content(
     content: impl Into<Vec<UserContentBlock>>,
     options: Option<ClaudeAgentOptions>,
 ) -> Result<Vec<Message>> {
+    // Validate options first (fail fast - cheaper check)
+    let opts = options.unwrap_or_default();
+    validate_oneshot_options(&opts)?;
+
+    // Then validate content
     let content_blocks = content.into();
     UserContentBlock::validate_content(&content_blocks)?;
 
     let query_prompt = QueryPrompt::Content(content_blocks);
-    let opts = options.unwrap_or_default();
-
     let client = InternalClient::new(query_prompt, opts)?;
     client.execute().await
 }
@@ -183,10 +242,15 @@ pub async fn query_with_content(
 /// Combines the benefits of [`query_stream`] (memory efficiency, real-time processing)
 /// with support for structured content blocks including images.
 ///
+/// **Note:** This function does not support `can_use_tool` callbacks or hooks.
+/// For permission handling or hook support, use [`ClaudeClient`] instead.
+///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The content vector is empty (must include at least one text or image block)
+/// - `options.can_use_tool` is set (use ClaudeClient instead)
+/// - `options.hooks` is set (use ClaudeClient instead)
 /// - Claude CLI cannot be found or started
 /// - The streaming connection fails
 ///
@@ -226,12 +290,15 @@ pub async fn query_stream_with_content(
     content: impl Into<Vec<UserContentBlock>>,
     options: Option<ClaudeAgentOptions>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<Message>> + Send>>> {
+    // Validate options first (fail fast - cheaper check)
+    let opts = options.unwrap_or_default();
+    validate_oneshot_options(&opts)?;
+
+    // Then validate content
     let content_blocks = content.into();
     UserContentBlock::validate_content(&content_blocks)?;
 
     let query_prompt = QueryPrompt::Content(content_blocks);
-    let opts = options.unwrap_or_default();
-
     let mut transport = SubprocessTransport::new(query_prompt, opts)?;
     transport.connect().await?;
 
@@ -257,4 +324,102 @@ pub async fn query_stream_with_content(
     };
 
     Ok(Box::pin(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::hooks::{HookContext, HookInput, HookJsonOutput, Hooks, SyncHookJsonOutput};
+    use crate::types::permissions::{PermissionResult, PermissionResultAllow};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_validate_oneshot_options_accepts_default() {
+        let opts = ClaudeAgentOptions::default();
+        assert!(validate_oneshot_options(&opts).is_ok());
+    }
+
+    #[test]
+    fn test_validate_oneshot_options_accepts_normal_options() {
+        let opts = ClaudeAgentOptions::builder()
+            .model("claude-sonnet-4-20250514")
+            .cwd("/tmp")
+            .build();
+        assert!(validate_oneshot_options(&opts).is_ok());
+    }
+
+    #[test]
+    fn test_validate_oneshot_options_rejects_can_use_tool() {
+        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
+            |_tool_name, _tool_input, _context| {
+                Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
+            },
+        );
+
+        let opts = ClaudeAgentOptions::builder()
+            .can_use_tool(callback)
+            .build();
+
+        let result = validate_oneshot_options(&opts);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ClaudeError::InvalidConfig(_)));
+        assert!(err.to_string().contains("can_use_tool"));
+    }
+
+    #[test]
+    fn test_validate_oneshot_options_rejects_hooks() {
+        async fn test_hook(
+            _input: HookInput,
+            _tool_use_id: Option<String>,
+            _context: HookContext,
+        ) -> HookJsonOutput {
+            HookJsonOutput::Sync(SyncHookJsonOutput::default())
+        }
+
+        let mut hooks = Hooks::new();
+        hooks.add_stop(test_hook);
+        let hooks_map = hooks.build();
+
+        let opts = ClaudeAgentOptions::builder().hooks(hooks_map).build();
+
+        let result = validate_oneshot_options(&opts);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ClaudeError::InvalidConfig(_)));
+        assert!(err.to_string().contains("hooks"));
+    }
+
+    #[test]
+    fn test_validate_oneshot_options_rejects_both() {
+        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
+            |_tool_name, _tool_input, _context| {
+                Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
+            },
+        );
+
+        async fn test_hook(
+            _input: HookInput,
+            _tool_use_id: Option<String>,
+            _context: HookContext,
+        ) -> HookJsonOutput {
+            HookJsonOutput::Sync(SyncHookJsonOutput::default())
+        }
+
+        let mut hooks = Hooks::new();
+        hooks.add_stop(test_hook);
+        let hooks_map = hooks.build();
+
+        let opts = ClaudeAgentOptions::builder()
+            .can_use_tool(callback)
+            .hooks(hooks_map)
+            .build();
+
+        // Should fail on first check (can_use_tool)
+        let result = validate_oneshot_options(&opts);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("can_use_tool"));
+    }
 }

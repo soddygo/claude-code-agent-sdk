@@ -30,6 +30,10 @@ pub enum ClaudeError {
     #[error("Control protocol error: {0}")]
     ControlProtocol(String),
 
+    /// Timeout error
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),

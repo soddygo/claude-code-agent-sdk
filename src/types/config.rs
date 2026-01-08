@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use typed_builder::TypedBuilder;
 
 use super::hooks::{HookEvent, HookMatcher};
@@ -128,6 +129,11 @@ pub struct ClaudeAgentOptions {
     /// using `ClaudeClient.rewind_files()`.
     #[builder(default = false)]
     pub enable_file_checkpointing: bool,
+    /// Timeout for control requests (initialize, interrupt, etc.).
+    /// Default is 60 seconds, aligned with Python SDK behavior.
+    /// Set to `None` to disable timeout (not recommended).
+    #[builder(default = Some(Duration::from_secs(60)))]
+    pub control_request_timeout: Option<Duration>,
 }
 
 impl Default for ClaudeAgentOptions {
@@ -455,5 +461,33 @@ impl ClaudeAgentOptions {
                 self.allowed_tools.push(mcp_name);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_control_request_timeout_default() {
+        let opts = ClaudeAgentOptions::default();
+        // Default should be 60 seconds
+        assert_eq!(opts.control_request_timeout, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_control_request_timeout_custom() {
+        let opts = ClaudeAgentOptions::builder()
+            .control_request_timeout(Some(Duration::from_secs(30)))
+            .build();
+        assert_eq!(opts.control_request_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_control_request_timeout_none() {
+        let opts = ClaudeAgentOptions::builder()
+            .control_request_timeout(None)
+            .build();
+        assert_eq!(opts.control_request_timeout, None);
     }
 }

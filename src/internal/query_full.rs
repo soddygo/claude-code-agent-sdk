@@ -5,8 +5,10 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::time::timeout;
 
 use crate::errors::{ClaudeError, Result};
 use crate::types::hooks::{HookCallback, HookContext, HookInput, HookMatcher};
@@ -14,6 +16,9 @@ use crate::types::mcp::McpSdkServerConfig;
 use crate::types::permissions::{CanUseToolCallback, ToolPermissionContext, PermissionResult, PermissionResultDeny};
 
 use super::transport::Transport;
+
+/// Default timeout for control requests (60 seconds, aligned with Python SDK)
+pub const DEFAULT_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Control request from SDK to CLI
 #[allow(dead_code)]
@@ -68,10 +73,12 @@ pub struct QueryFull {
     pub(crate) stdin: Option<Arc<Mutex<Option<tokio::process::ChildStdin>>>>,
     // Store initialization result for get_server_info()
     initialization_result: Arc<Mutex<Option<serde_json::Value>>>,
+    // Configurable timeout for control requests
+    control_request_timeout: Option<Duration>,
 }
 
 impl QueryFull {
-    /// Create a new Query
+    /// Create a new Query with default timeout (60 seconds)
     pub fn new(transport: Box<dyn Transport>) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
@@ -87,7 +94,14 @@ impl QueryFull {
             message_rx: Arc::new(Mutex::new(message_rx)),
             stdin: None,
             initialization_result: Arc::new(Mutex::new(None)),
+            control_request_timeout: Some(DEFAULT_CONTROL_REQUEST_TIMEOUT),
         }
+    }
+
+    /// Set the timeout for control requests.
+    /// Pass `None` to disable timeout (not recommended - may hang indefinitely).
+    pub fn set_control_request_timeout(&mut self, timeout: Option<Duration>) {
+        self.control_request_timeout = timeout;
     }
 
     /// Set stdin for direct write access (called from client after transport is connected)
@@ -538,10 +552,42 @@ impl QueryFull {
             return Err(ClaudeError::Transport("stdin not set".to_string()));
         }
 
-        // Wait for response
-        let response = rx.await.map_err(|_| {
-            ClaudeError::ControlProtocol("Control request response channel closed".to_string())
-        })?;
+        // Wait for response with timeout (if configured)
+        // Clone pending_responses reference for cleanup on timeout/error
+        let pending_responses = Arc::clone(&self.pending_responses);
+        let request_id_for_cleanup = request_id.clone();
+
+        let response = if let Some(timeout_duration) = self.control_request_timeout {
+            // With timeout
+            match timeout(timeout_duration, rx).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => {
+                    // Channel closed - clean up
+                    pending_responses.lock().await.remove(&request_id_for_cleanup);
+                    return Err(ClaudeError::ControlProtocol(
+                        "Control request response channel closed".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    // Timeout - clean up the pending request to prevent memory leak
+                    pending_responses.lock().await.remove(&request_id_for_cleanup);
+                    return Err(ClaudeError::Timeout(format!(
+                        "Control request timed out after {:?}",
+                        timeout_duration
+                    )));
+                }
+            }
+        } else {
+            // No timeout (not recommended)
+            rx.await.map_err(|_| {
+                pending_responses.try_lock().map(|mut guard| {
+                    guard.remove(&request_id_for_cleanup);
+                }).ok();
+                ClaudeError::ControlProtocol(
+                    "Control request response channel closed".to_string(),
+                )
+            })?
+        };
 
         Ok(response)
     }

@@ -125,9 +125,25 @@ impl ClaudeClient {
     /// - Claude CLI cannot be found or started
     /// - The initialization handshake fails
     /// - Hook registration fails
+    /// - `can_use_tool` callback is set with incompatible `permission_prompt_tool_name`
     pub async fn connect(&mut self) -> Result<()> {
         if self.connected {
             return Ok(());
+        }
+
+        // Validate can_use_tool configuration (aligned with Python SDK behavior)
+        // When can_use_tool callback is set, permission_prompt_tool_name must be "stdio"
+        // to ensure the control protocol can handle permission requests
+        if self.options.can_use_tool.is_some() {
+            if let Some(ref tool_name) = self.options.permission_prompt_tool_name {
+                if tool_name != "stdio" {
+                    return Err(ClaudeError::InvalidConfig(
+                        "can_use_tool callback requires permission_prompt_tool_name to be 'stdio' or unset. \
+                        Custom permission_prompt_tool_name is incompatible with can_use_tool callback."
+                            .to_string(),
+                    ));
+                }
+            }
         }
 
         // Create transport in streaming mode (no initial prompt)
@@ -143,6 +159,9 @@ impl ClaudeClient {
         // Create Query with hooks
         let mut query = QueryFull::new(Box::new(transport));
         query.set_stdin(stdin);
+
+        // Set control request timeout from options
+        query.set_control_request_timeout(self.options.control_request_timeout);
 
         // Extract SDK MCP servers from options
         let sdk_mcp_servers =
@@ -833,6 +852,87 @@ impl Drop for ClaudeClient {
         if self.connected {
             eprintln!(
                 "Warning: ClaudeClient dropped without calling disconnect(). Resources may not be cleaned up properly."
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::permissions::{PermissionResult, PermissionResultAllow};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_connect_rejects_can_use_tool_with_custom_permission_tool() {
+        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
+            |_tool_name, _tool_input, _context| {
+                Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
+            },
+        );
+
+        let opts = ClaudeAgentOptions::builder()
+            .can_use_tool(callback)
+            .permission_prompt_tool_name("custom_tool") // Not "stdio"
+            .build();
+
+        let mut client = ClaudeClient::new(opts);
+        let result = client.connect().await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ClaudeError::InvalidConfig(_)));
+        assert!(err.to_string().contains("permission_prompt_tool_name"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_accepts_can_use_tool_with_stdio() {
+        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
+            |_tool_name, _tool_input, _context| {
+                Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
+            },
+        );
+
+        let opts = ClaudeAgentOptions::builder()
+            .can_use_tool(callback)
+            .permission_prompt_tool_name("stdio") // Explicitly "stdio" is OK
+            .build();
+
+        let mut client = ClaudeClient::new(opts);
+        // This will fail later (CLI not found), but should pass validation
+        let result = client.connect().await;
+
+        // Should not be InvalidConfig error about permission_prompt_tool_name
+        if let Err(ref err) = result {
+            assert!(
+                !err.to_string().contains("permission_prompt_tool_name"),
+                "Should not fail on permission_prompt_tool_name validation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_accepts_can_use_tool_without_permission_tool() {
+        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
+            |_tool_name, _tool_input, _context| {
+                Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
+            },
+        );
+
+        let opts = ClaudeAgentOptions::builder()
+            .can_use_tool(callback)
+            // No permission_prompt_tool_name set - defaults to stdio
+            .build();
+
+        let mut client = ClaudeClient::new(opts);
+        // This will fail later (CLI not found), but should pass validation
+        let result = client.connect().await;
+
+        // Should not be InvalidConfig error about permission_prompt_tool_name
+        if let Err(ref err) = result {
+            assert!(
+                !err.to_string().contains("permission_prompt_tool_name"),
+                "Should not fail on permission_prompt_tool_name validation"
             );
         }
     }
