@@ -10,14 +10,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::errors::{
     ClaudeError, CliNotFoundError, ConnectionError, JsonDecodeError, ProcessError, Result,
 };
 use crate::types::config::ClaudeAgentOptions;
-use crate::types::messages::UserContentBlock;
 use crate::types::mcp::{McpServerConfig, McpServers};
+use crate::types::messages::UserContentBlock;
 use crate::version::{
     ENTRYPOINT, MIN_CLI_VERSION, SDK_VERSION, SKIP_VERSION_CHECK_ENV, check_version,
 };
@@ -582,7 +582,11 @@ impl SubprocessTransport {
 
 #[async_trait]
 impl Transport for SubprocessTransport {
+    #[instrument(name = "claude.transport.connect", skip(self), fields(cli_path = %self.cli_path.display()))]
     async fn connect(&mut self) -> Result<()> {
+        info!("Starting Claude CLI subprocess");
+        debug!("CLI path: {}", self.cli_path.display());
+
         // Note: cwd validation is done in new() for early error detection
 
         // Check version
@@ -606,12 +610,14 @@ impl Transport for SubprocessTransport {
 
         // Spawn process
         let mut child = cmd.spawn().map_err(|e| {
+            error!("Failed to spawn Claude CLI: {}", e);
             ClaudeError::Process(ProcessError::new(
                 format!("Failed to spawn Claude CLI process: {}", e),
                 None,
                 None,
             ))
         })?;
+        info!("Claude CLI process spawned (PID: {:?})", child.id());
 
         // Take stdin and stdout
         let stdin = child.stdin.take().ok_or_else(|| {
@@ -672,9 +678,11 @@ impl Transport for SubprocessTransport {
             }
         }
 
+        info!("Claude CLI subprocess connected successfully");
         Ok(())
     }
 
+    #[instrument(name = "claude.transport.write", skip(self, data), fields(data_length = data.len()))]
     async fn write(&mut self, data: &str) -> Result<()> {
         let mut stdin_guard = self.stdin.lock().await;
         if let Some(ref mut stdin) = *stdin_guard {

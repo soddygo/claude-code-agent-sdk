@@ -1,5 +1,7 @@
 //! Simple query function for one-shot interactions
 
+use tracing::{debug, info, instrument};
+
 use crate::errors::{ClaudeError, Result};
 use crate::internal::client::InternalClient;
 use crate::internal::message_parser::MessageParser;
@@ -75,18 +77,29 @@ fn validate_oneshot_options(options: &ClaudeAgentOptions) -> Result<()> {
 ///     Ok(())
 /// }
 /// ```
+#[instrument(
+    name = "claude.query",
+    skip(prompt, options),
+    fields(
+        has_options = options.is_some(),
+    )
+)]
 pub async fn query(
     prompt: impl Into<String>,
     options: Option<ClaudeAgentOptions>,
 ) -> Result<Vec<Message>> {
-    let query_prompt = QueryPrompt::Text(prompt.into());
+    let prompt_str = prompt.into();
+    let query_prompt = QueryPrompt::Text(prompt_str);
     let opts = options.unwrap_or_default();
 
-    // Validate that incompatible options are not set
+    info!("Starting one-shot Claude query");
     validate_oneshot_options(&opts)?;
 
     let client = InternalClient::new(query_prompt, opts)?;
-    client.execute().await
+    let result = client.execute().await?;
+
+    debug!("Query completed, received {} messages", result.len());
+    Ok(result)
 }
 
 /// Query Claude Code with streaming responses for memory-efficient processing.
@@ -137,18 +150,22 @@ pub async fn query(
 ///     Ok(())
 /// }
 /// ```
+#[instrument(name = "claude.query_stream", skip(prompt, options))]
 pub async fn query_stream(
     prompt: impl Into<String>,
     options: Option<ClaudeAgentOptions>,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<Message>> + Send>>> {
-    let query_prompt = QueryPrompt::Text(prompt.into());
+    let prompt_str = prompt.into();
+    let query_prompt = QueryPrompt::Text(prompt_str);
     let opts = options.unwrap_or_default();
 
-    // Validate that incompatible options are not set
+    info!("Starting streaming Claude query");
     validate_oneshot_options(&opts)?;
 
     let mut transport = SubprocessTransport::new(query_prompt, opts)?;
     transport.connect().await?;
+
+    debug!("Stream established");
 
     // Move transport into the stream to extend its lifetime
     let stream = async_stream::stream! {
@@ -220,6 +237,13 @@ pub async fn query_stream(
 ///     Ok(())
 /// }
 /// ```
+#[instrument(
+    name = "claude.query_with_content",
+    skip(content, options),
+    fields(
+        has_options = options.is_some(),
+    )
+)]
 pub async fn query_with_content(
     content: impl Into<Vec<UserContentBlock>>,
     options: Option<ClaudeAgentOptions>,
@@ -232,9 +256,20 @@ pub async fn query_with_content(
     let content_blocks = content.into();
     UserContentBlock::validate_content(&content_blocks)?;
 
+    info!(
+        "Starting one-shot Claude query with {} content blocks",
+        content_blocks.len()
+    );
+
     let query_prompt = QueryPrompt::Content(content_blocks);
     let client = InternalClient::new(query_prompt, opts)?;
-    client.execute().await
+    let result = client.execute().await?;
+
+    debug!(
+        "Query with content completed, received {} messages",
+        result.len()
+    );
+    Ok(result)
 }
 
 /// Query Claude Code with streaming and structured content blocks.
@@ -286,6 +321,7 @@ pub async fn query_with_content(
 ///     Ok(())
 /// }
 /// ```
+#[instrument(name = "claude.query_stream_with_content", skip(content, options))]
 pub async fn query_stream_with_content(
     content: impl Into<Vec<UserContentBlock>>,
     options: Option<ClaudeAgentOptions>,
@@ -298,9 +334,16 @@ pub async fn query_stream_with_content(
     let content_blocks = content.into();
     UserContentBlock::validate_content(&content_blocks)?;
 
+    info!(
+        "Starting streaming Claude query with {} content blocks",
+        content_blocks.len()
+    );
+
     let query_prompt = QueryPrompt::Content(content_blocks);
     let mut transport = SubprocessTransport::new(query_prompt, opts)?;
     transport.connect().await?;
+
+    debug!("Content stream established");
 
     let stream = async_stream::stream! {
         let mut message_stream = transport.read_messages();
@@ -350,15 +393,12 @@ mod tests {
 
     #[test]
     fn test_validate_oneshot_options_rejects_can_use_tool() {
-        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
-            |_tool_name, _tool_input, _context| {
+        let callback: crate::types::permissions::CanUseToolCallback =
+            Arc::new(|_tool_name, _tool_input, _context| {
                 Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
-            },
-        );
+            });
 
-        let opts = ClaudeAgentOptions::builder()
-            .can_use_tool(callback)
-            .build();
+        let opts = ClaudeAgentOptions::builder().can_use_tool(callback).build();
 
         let result = validate_oneshot_options(&opts);
         assert!(result.is_err());
@@ -394,11 +434,10 @@ mod tests {
 
     #[test]
     fn test_validate_oneshot_options_rejects_both() {
-        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
-            |_tool_name, _tool_input, _context| {
+        let callback: crate::types::permissions::CanUseToolCallback =
+            Arc::new(|_tool_name, _tool_input, _context| {
                 Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
-            },
-        );
+            });
 
         async fn test_hook(
             _input: HookInput,

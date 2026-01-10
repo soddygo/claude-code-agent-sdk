@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-agent-sdk"
-version = "0.1.18"
+version = "0.1.19"
 authors = ["soddygo <soddygo@qq.com>"]
 edition = "2024"
 rust-version = "1.90"
@@ -16,7 +16,7 @@ include = ["src/**/*.rs", "Cargo.toml", "LICENSE", "README.md"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.48", features = [
+tokio = { version = "1.49", features = [
   "macros",
   "rt-multi-thread",
   "process",

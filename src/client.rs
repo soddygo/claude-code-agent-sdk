@@ -1,5 +1,7 @@
 //! ClaudeClient for bidirectional streaming interactions with hook support
 
+use tracing::{debug, info, instrument};
+
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -126,10 +128,22 @@ impl ClaudeClient {
     /// - The initialization handshake fails
     /// - Hook registration fails
     /// - `can_use_tool` callback is set with incompatible `permission_prompt_tool_name`
+    #[instrument(
+        name = "claude.client.connect",
+        skip(self),
+        fields(
+            has_can_use_tool = self.options.can_use_tool.is_some(),
+            has_hooks = self.options.hooks.is_some(),
+            model = %self.options.model.as_deref().unwrap_or("default"),
+        )
+    )]
     pub async fn connect(&mut self) -> Result<()> {
         if self.connected {
+            debug!("Client already connected, skipping");
             return Ok(());
         }
+
+        info!("Connecting to Claude Code CLI");
 
         // Validate can_use_tool configuration (aligned with Python SDK behavior)
         // When can_use_tool callback is set, permission_prompt_tool_name must be "stdio"
@@ -215,6 +229,7 @@ impl ClaudeClient {
         self.query = Some(Arc::new(Mutex::new(query)));
         self.connected = true;
 
+        info!("Successfully connected to Claude Code CLI");
         Ok(())
     }
 
@@ -243,6 +258,11 @@ impl ClaudeClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[instrument(
+        name = "claude.client.query",
+        skip(self, prompt),
+        fields(session_id = "default",)
+    )]
     pub async fn query(&mut self, prompt: impl Into<String>) -> Result<()> {
         self.query_with_session(prompt, "default").await
     }
@@ -815,10 +835,14 @@ impl ClaudeClient {
     /// # Errors
     ///
     /// Returns an error if disconnection fails.
+    #[instrument(name = "claude.client.disconnect", skip(self))]
     pub async fn disconnect(&mut self) -> Result<()> {
         if !self.connected {
+            debug!("Client already disconnected");
             return Ok(());
         }
+
+        info!("Disconnecting from Claude Code CLI");
 
         if let Some(query) = self.query.take() {
             // Close stdin first (using direct access) to signal CLI to exit
@@ -841,6 +865,7 @@ impl ClaudeClient {
         }
 
         self.connected = false;
+        debug!("Disconnected successfully");
         Ok(())
     }
 }
@@ -865,11 +890,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_rejects_can_use_tool_with_custom_permission_tool() {
-        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
-            |_tool_name, _tool_input, _context| {
+        let callback: crate::types::permissions::CanUseToolCallback =
+            Arc::new(|_tool_name, _tool_input, _context| {
                 Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
-            },
-        );
+            });
 
         let opts = ClaudeAgentOptions::builder()
             .can_use_tool(callback)
@@ -887,11 +911,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_accepts_can_use_tool_with_stdio() {
-        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
-            |_tool_name, _tool_input, _context| {
+        let callback: crate::types::permissions::CanUseToolCallback =
+            Arc::new(|_tool_name, _tool_input, _context| {
                 Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
-            },
-        );
+            });
 
         let opts = ClaudeAgentOptions::builder()
             .can_use_tool(callback)
@@ -913,11 +936,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_accepts_can_use_tool_without_permission_tool() {
-        let callback: crate::types::permissions::CanUseToolCallback = Arc::new(
-            |_tool_name, _tool_input, _context| {
+        let callback: crate::types::permissions::CanUseToolCallback =
+            Arc::new(|_tool_name, _tool_input, _context| {
                 Box::pin(async move { PermissionResult::Allow(PermissionResultAllow::default()) })
-            },
-        );
+            });
 
         let opts = ClaudeAgentOptions::builder()
             .can_use_tool(callback)

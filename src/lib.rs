@@ -229,9 +229,111 @@
 //!
 //! ## Documentation
 //!
-//! - [README](https://github.com/yourusername/claude-agent-sdk-rs/blob/master/README.md) - Getting started
-//! - [Plugin Guide](https://github.com/yourusername/claude-agent-sdk-rs/blob/master/PLUGIN_GUIDE.md) - Plugin development
-//! - [Examples](https://github.com/yourusername/claude-agent-sdk-rs/tree/master/examples) - 22 working examples
+//! - [README](https://github.com/soddygo/claude-code-agent-sdk/blob/master/README.md) - Getting started
+//! - [Plugin Guide](https://github.com/soddygo/claude-code-agent-sdk/blob/master/PLUGIN_GUIDE.md) - Plugin development
+//! - [Examples](https://github.com/soddygo/claude-code-agent-sdk/tree/master/examples) - 22 working examples
+//!
+//! ## Tracing Support
+//!
+//! This SDK uses the [`tracing`] crate for instrumentation. All major operations
+//! are automatically traced using `#[instrument]` attributes, making it easy to
+//! monitor and debug your application.
+//!
+//! ### Basic Usage (Console Logging)
+//!
+//! ```no_run
+//! use claude_agent_sdk_rs::query;
+//! use tracing_subscriber;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     // Initialize tracing subscriber for console output
+//!     tracing_subscriber::fmt::init();
+//!
+//!     // Use SDK - traces are automatically logged to console
+//!     let messages = query("What is 2 + 2?", None).await?;
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### OpenTelemetry Integration
+//!
+//! To export traces to OpenTelemetry-compatible backends (Jaeger, OTel, etc.):
+//!
+//! ```no_run
+//! use claude_agent_sdk_rs::query;
+//! use tracing_subscriber::{Registry, prelude::*};
+//! use tracing_opentelemetry::OpenTelemetryLayer;
+//! use opentelemetry_otlp;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     // Initialize OpenTelemetry with OTLP exporter
+//!     let tracer = opentelemetry_otlp::new_pipeline()
+//!         .tracing()
+//!         .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+//!         .install_simple()?;
+//!
+//!     let otel_layer = OpenTelemetryLayer::new(tracer);
+//!
+//!     // Combine with fmt layer for console output too
+//!     Registry::default()
+//!         .with(otel_layer)
+//!         .with(tracing_subscriber::fmt::layer())
+//!         .init();
+//!
+//!     // Use SDK - traces are exported to OTLP
+//!     let messages = query("What is 2 + 2?", None).await?;
+//!
+//!     // Shutdown telemetry
+//!     opentelemetry_sdk::global::shutdown_tracer_provider();
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### Available Spans
+//!
+//! The SDK creates the following spans for comprehensive tracing:
+//!
+//! - `claude.query` - Top-level one-shot query operation
+//! - `claude.query_stream` - Streaming query operation
+//! - `claude.query_with_content` - Query with structured content (images)
+//! - `claude.query_stream_with_content` - Streaming query with content
+//! - `claude.client.connect` - Client connection establishment
+//! - `claude.client.query` - Client query send
+//! - `claude.client.disconnect` - Client disconnection
+//! - `claude.transport.connect` - Transport layer connection (subprocess spawn)
+//! - `claude.transport.write` - Writing to transport stdin
+//! - `claude.query_full.start` - Background message reader start
+//! - `claude.query_full.initialize` - Query initialization with hooks
+//! - `claude.internal.execute` - Internal client execution
+//!
+//! Each span includes relevant fields:
+//! - `prompt_length` - Length of the user prompt
+//! - `has_options` - Whether custom options were provided
+//! - `content_block_count` - Number of content blocks (for content queries)
+//! - `session_id` - Session identifier (for client queries)
+//! - `model` - Model name being used
+//! - `has_can_use_tool` - Whether permission callback is set
+//! - `has_hooks` - Whether hooks are configured
+//! - `cli_path` - Path to Claude CLI executable
+//! - `data_length` - Length of data being written
+//!
+//! ### Environment Variables
+//!
+//! Control tracing behavior using standard `RUST_LOG` environment variable:
+//!
+//! ```bash
+//! # Show all SDK logs
+//! RUST_LOG=claude_agent_sdk_rs=debug cargo run
+//!
+//! # Show only errors
+//! RUST_LOG=claude_agent_sdk_rs=error cargo run
+//!
+//! # Combine with other crates
+//! RUST_LOG=claude_agent_sdk_rs=info,tokio=warn cargo run
+//! ```
 
 pub mod client;
 pub mod errors;
@@ -246,10 +348,20 @@ pub use types::{
     config::*,
     hooks::*,
     mcp::{
-        McpServerConfig, McpServers, SdkMcpServer, SdkMcpTool, ToolDefinition, ToolHandler, ToolResult,
-        ToolResultContent as McpToolResultContent, create_sdk_mcp_server,
         // ACP tool name prefix support
-        ACP_TOOL_PREFIX, acp_tool_name, is_acp_tool, strip_acp_prefix,
+        ACP_TOOL_PREFIX,
+        McpServerConfig,
+        McpServers,
+        SdkMcpServer,
+        SdkMcpTool,
+        ToolDefinition,
+        ToolHandler,
+        ToolResult,
+        ToolResultContent as McpToolResultContent,
+        acp_tool_name,
+        create_sdk_mcp_server,
+        is_acp_tool,
+        strip_acp_prefix,
     },
     messages::*,
     permissions::*,

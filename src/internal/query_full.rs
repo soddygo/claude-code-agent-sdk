@@ -1,5 +1,7 @@
 //! Full Query implementation with bidirectional control protocol
 
+use tracing::{debug, info, instrument};
+
 use futures::stream::StreamExt;
 use serde_json::json;
 use std::collections::HashMap;
@@ -13,7 +15,9 @@ use tokio::time::timeout;
 use crate::errors::{ClaudeError, Result};
 use crate::types::hooks::{HookCallback, HookContext, HookInput, HookMatcher};
 use crate::types::mcp::McpSdkServerConfig;
-use crate::types::permissions::{CanUseToolCallback, ToolPermissionContext, PermissionResult, PermissionResultDeny};
+use crate::types::permissions::{
+    CanUseToolCallback, PermissionResult, PermissionResultDeny, ToolPermissionContext,
+};
 
 use super::transport::Transport;
 
@@ -120,10 +124,19 @@ impl QueryFull {
     }
 
     /// Initialize with hooks
+    #[instrument(name = "claude.query_full.initialize", skip(self, hooks))]
     pub async fn initialize(
         &self,
         hooks: Option<HashMap<String, Vec<HookMatcher>>>,
     ) -> Result<serde_json::Value> {
+        debug!("Initializing query");
+        if hooks.is_some() {
+            debug!(
+                "Registering {} hook types",
+                hooks.as_ref().map(|h| h.len()).unwrap_or(0)
+            );
+        }
+
         // Build hooks configuration
         let mut hooks_config: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
@@ -174,11 +187,15 @@ impl QueryFull {
         // Store initialization result for get_server_info()
         *self.initialization_result.lock().await = Some(response.clone());
 
+        info!("Query initialized successfully");
         Ok(response)
     }
 
     /// Start reading messages in background
+    #[instrument(name = "claude.query_full.start", skip(self))]
     pub async fn start(&self) -> Result<()> {
+        debug!("Starting background message reader");
+
         let transport = Arc::clone(&self.transport);
         let hook_callbacks = Arc::clone(&self.hook_callbacks);
         let sdk_mcp_servers = Arc::clone(&self.sdk_mcp_servers);
@@ -223,7 +240,9 @@ impl QueryFull {
                                 let can_use_tool_clone = Arc::clone(&can_use_tool);
 
                                 // Try to parse the request
-                                match serde_json::from_value::<IncomingControlRequest>(message.clone()) {
+                                match serde_json::from_value::<IncomingControlRequest>(
+                                    message.clone(),
+                                ) {
                                     Ok(request) => {
                                         tokio::spawn(async move {
                                             if let Err(e) = Self::handle_control_request_with_stdin(
@@ -237,7 +256,10 @@ impl QueryFull {
                                             {
                                                 // This error is from write_to_stdin failing, which means
                                                 // we can't communicate with CLI anyway
-                                                tracing::error!("Error handling control request: {}", e);
+                                                tracing::error!(
+                                                    "Error handling control request: {}",
+                                                    e
+                                                );
                                             }
                                         });
                                     }
@@ -260,8 +282,14 @@ impl QueryFull {
                                         });
 
                                         tokio::spawn(async move {
-                                            if let Err(e) = Self::write_to_stdin(&stdin_clone, &error_response).await {
-                                                tracing::error!("Failed to send parse error response: {}", e);
+                                            if let Err(e) =
+                                                Self::write_to_stdin(&stdin_clone, &error_response)
+                                                    .await
+                                            {
+                                                tracing::error!(
+                                                    "Failed to send parse error response: {}",
+                                                    e
+                                                );
                                             }
                                         });
                                     }
@@ -283,6 +311,7 @@ impl QueryFull {
             .await
             .map_err(|_| ClaudeError::Transport("Background task failed to start".to_string()))?;
 
+        info!("Background message reader started");
         Ok(())
     }
 
@@ -300,13 +329,9 @@ impl QueryFull {
         let request_id = request.request_id.clone();
 
         // Try to process the request and send appropriate response
-        let result = Self::process_control_request(
-            request,
-            hook_callbacks,
-            sdk_mcp_servers,
-            can_use_tool,
-        )
-        .await;
+        let result =
+            Self::process_control_request(request, hook_callbacks, sdk_mcp_servers, can_use_tool)
+                .await;
 
         // Build response based on result
         let response = match result {
@@ -360,13 +385,12 @@ impl QueryFull {
                     .get("tool_name")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        ClaudeError::ControlProtocol("Missing tool_name for can_use_tool".to_string())
+                        ClaudeError::ControlProtocol(
+                            "Missing tool_name for can_use_tool".to_string(),
+                        )
                     })?;
 
-                let tool_input = request_data
-                    .get("tool_input")
-                    .cloned()
-                    .unwrap_or(json!({}));
+                let tool_input = request_data.get("tool_input").cloned().unwrap_or(json!({}));
 
                 // Parse suggestions if present
                 let suggestions = request_data
@@ -386,17 +410,26 @@ impl QueryFull {
                     let result = callback(tool_name.to_string(), tool_input, context).await;
                     // Serialize the permission result
                     serde_json::to_value(&result).map_err(|e| {
-                        ClaudeError::ControlProtocol(format!("Failed to serialize permission result: {}", e))
+                        ClaudeError::ControlProtocol(format!(
+                            "Failed to serialize permission result: {}",
+                            e
+                        ))
                     })
                 } else {
                     // No callback registered - deny by default with a message
-                    tracing::warn!("No can_use_tool callback registered, denying tool: {}", tool_name);
+                    tracing::warn!(
+                        "No can_use_tool callback registered, denying tool: {}",
+                        tool_name
+                    );
                     let deny_result = PermissionResult::Deny(PermissionResultDeny {
                         message: "No permission callback registered".to_string(),
                         interrupt: false,
                     });
                     serde_json::to_value(&deny_result).map_err(|e| {
-                        ClaudeError::ControlProtocol(format!("Failed to serialize deny result: {}", e))
+                        ClaudeError::ControlProtocol(format!(
+                            "Failed to serialize deny result: {}",
+                            e
+                        ))
                     })
                 }
             }
@@ -458,12 +491,10 @@ impl QueryFull {
 
                 Ok(json!({"mcp_response": mcp_response}))
             }
-            _ => {
-                Err(ClaudeError::ControlProtocol(format!(
-                    "Unsupported control request subtype: {}",
-                    subtype
-                )))
-            }
+            _ => Err(ClaudeError::ControlProtocol(format!(
+                "Unsupported control request subtype: {}",
+                subtype
+            ))),
         }
     }
 
@@ -563,14 +594,20 @@ impl QueryFull {
                 Ok(Ok(response)) => response,
                 Ok(Err(_)) => {
                     // Channel closed - clean up
-                    pending_responses.lock().await.remove(&request_id_for_cleanup);
+                    pending_responses
+                        .lock()
+                        .await
+                        .remove(&request_id_for_cleanup);
                     return Err(ClaudeError::ControlProtocol(
                         "Control request response channel closed".to_string(),
                     ));
                 }
                 Err(_) => {
                     // Timeout - clean up the pending request to prevent memory leak
-                    pending_responses.lock().await.remove(&request_id_for_cleanup);
+                    pending_responses
+                        .lock()
+                        .await
+                        .remove(&request_id_for_cleanup);
                     return Err(ClaudeError::Timeout(format!(
                         "Control request timed out after {:?}",
                         timeout_duration
@@ -580,12 +617,13 @@ impl QueryFull {
         } else {
             // No timeout (not recommended)
             rx.await.map_err(|_| {
-                pending_responses.try_lock().map(|mut guard| {
-                    guard.remove(&request_id_for_cleanup);
-                }).ok();
-                ClaudeError::ControlProtocol(
-                    "Control request response channel closed".to_string(),
-                )
+                pending_responses
+                    .try_lock()
+                    .map(|mut guard| {
+                        guard.remove(&request_id_for_cleanup);
+                    })
+                    .ok();
+                ClaudeError::ControlProtocol("Control request response channel closed".to_string())
             })?
         };
 
@@ -741,26 +779,30 @@ mod tests {
 
     // Helper to create a can_use_tool callback that always allows
     fn allow_callback() -> CanUseToolCallback {
-        Arc::new(|_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
-            Box::pin(async move {
-                PermissionResult::Allow(PermissionResultAllow {
-                    updated_input: None,
-                    updated_permissions: None,
+        Arc::new(
+            |_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
+                Box::pin(async move {
+                    PermissionResult::Allow(PermissionResultAllow {
+                        updated_input: None,
+                        updated_permissions: None,
+                    })
                 })
-            })
-        })
+            },
+        )
     }
 
     // Helper to create a can_use_tool callback that always denies
     fn deny_callback() -> CanUseToolCallback {
-        Arc::new(|_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
-            Box::pin(async move {
-                PermissionResult::Deny(PermissionResultDeny {
-                    message: "User denied".to_string(),
-                    interrupt: true,
+        Arc::new(
+            |_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
+                Box::pin(async move {
+                    PermissionResult::Deny(PermissionResultDeny {
+                        message: "User denied".to_string(),
+                        interrupt: true,
+                    })
                 })
-            })
-        })
+            },
+        )
     }
 
     #[tokio::test]
@@ -869,14 +911,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_can_use_tool_with_updated_input() {
-        let callback: CanUseToolCallback = Arc::new(|_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
-            Box::pin(async move {
-                PermissionResult::Allow(PermissionResultAllow {
-                    updated_input: Some(json!({"command": "ls -la --safe"})),
-                    updated_permissions: None,
+        let callback: CanUseToolCallback = Arc::new(
+            |_tool_name, _input, _context| -> BoxFuture<'static, PermissionResult> {
+                Box::pin(async move {
+                    PermissionResult::Allow(PermissionResultAllow {
+                        updated_input: Some(json!({"command": "ls -la --safe"})),
+                        updated_permissions: None,
+                    })
                 })
-            })
-        });
+            },
+        );
 
         let request = make_control_request(json!({
             "subtype": "can_use_tool",
@@ -946,7 +990,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Unsupported control request subtype"));
+        assert!(
+            err.to_string()
+                .contains("Unsupported control request subtype")
+        );
     }
 
     #[tokio::test]

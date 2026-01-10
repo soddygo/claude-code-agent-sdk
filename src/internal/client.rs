@@ -1,5 +1,7 @@
 //! Internal client implementation
 
+use tracing::{debug, info, instrument};
+
 use futures::stream::StreamExt;
 
 use crate::errors::Result;
@@ -23,7 +25,10 @@ impl InternalClient {
     }
 
     /// Connect and get messages
+    #[instrument(name = "claude.internal.execute", skip(self))]
     pub async fn execute(mut self) -> Result<Vec<Message>> {
+        info!("Starting client execution");
+
         // Connect
         self.transport.connect().await?;
 
@@ -43,6 +48,10 @@ impl InternalClient {
         // Close transport
         self.transport.close().await?;
 
+        debug!(
+            "Client execution completed, received {} messages",
+            messages.len()
+        );
         Ok(messages)
     }
 }
