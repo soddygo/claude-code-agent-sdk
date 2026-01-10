@@ -148,17 +148,15 @@ impl ClaudeClient {
         // Validate can_use_tool configuration (aligned with Python SDK behavior)
         // When can_use_tool callback is set, permission_prompt_tool_name must be "stdio"
         // to ensure the control protocol can handle permission requests
-        if self.options.can_use_tool.is_some() {
-            if let Some(ref tool_name) = self.options.permission_prompt_tool_name {
-                if tool_name != "stdio" {
+        if self.options.can_use_tool.is_some()
+            && let Some(ref tool_name) = self.options.permission_prompt_tool_name
+                && tool_name != "stdio" {
                     return Err(ClaudeError::InvalidConfig(
                         "can_use_tool callback requires permission_prompt_tool_name to be 'stdio' or unset. \
                         Custom permission_prompt_tool_name is incompatible with can_use_tool callback."
                             .to_string(),
                     ));
                 }
-            }
-        }
 
         // Create transport in streaming mode (no initial prompt)
         let prompt = QueryPrompt::Streaming;
