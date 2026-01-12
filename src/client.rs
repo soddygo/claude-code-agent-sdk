@@ -145,11 +145,20 @@ impl ClaudeClient {
 
         info!("Connecting to Claude Code CLI");
 
+        // Automatically set permission_prompt_tool_name to "stdio" when can_use_tool is provided
+        // This matches Python SDK behavior (client.py lines 106-122)
+        // which ensures CLI uses control protocol for permission prompts
+        let mut options = self.options.clone();
+        if options.can_use_tool.is_some() && options.permission_prompt_tool_name.is_none() {
+            info!("can_use_tool callback is set, automatically setting permission_prompt_tool_name to 'stdio'");
+            options.permission_prompt_tool_name = Some("stdio".to_string());
+        }
+
         // Validate can_use_tool configuration (aligned with Python SDK behavior)
         // When can_use_tool callback is set, permission_prompt_tool_name must be "stdio"
         // to ensure the control protocol can handle permission requests
-        if self.options.can_use_tool.is_some()
-            && let Some(ref tool_name) = self.options.permission_prompt_tool_name
+        if options.can_use_tool.is_some()
+            && let Some(ref tool_name) = options.permission_prompt_tool_name
             && tool_name != "stdio"
         {
             return Err(ClaudeError::InvalidConfig(
@@ -161,7 +170,7 @@ impl ClaudeClient {
 
         // Create transport in streaming mode (no initial prompt)
         let prompt = QueryPrompt::Streaming;
-        let mut transport = SubprocessTransport::new(prompt, self.options.clone())?;
+        let mut transport = SubprocessTransport::new(prompt, options)?;
 
         // Don't send initial prompt - we'll use query() for that
         transport.connect().await?;

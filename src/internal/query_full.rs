@@ -177,6 +177,9 @@ impl QueryFull {
         }
 
         // Send initialize request
+        // Note: We don't need to tell CLI about can_use_tool callback explicitly.
+        // The CLI knows to use control protocol for permission requests when
+        // --permission-prompt-tool stdio is set (done automatically in client.rs)
         let request = json!({
             "subtype": "initialize",
             "hooks": if hooks_config.is_empty() { json!(null) } else { json!(hooks_config) }
