@@ -720,10 +720,14 @@ impl Transport for SubprocessTransport {
                     line.clear();
                     match reader.read_line(&mut line).await {
                         Ok(0) => {
+                            tracing::warn!("SDK transport: EOF received from CLI stdout");
                             // EOF
                             break;
                         }
                         Ok(n) => {
+                            if n > 0 {
+                                tracing::trace!("SDK transport: read {} bytes from CLI", n);
+                            }
                             buffer_size += n;
                             if buffer_size > max_buffer_size {
                                 yield Err(ClaudeError::Transport(format!(

@@ -215,9 +215,12 @@ impl QueryFull {
             let _ = ready_tx.send(());
 
             while let Some(result) = stream.next().await {
+                tracing::trace!("SDK background reader: received message from CLI");
+
                 match result {
                     Ok(message) => {
                         let msg_type = message.get("type").and_then(|v| v.as_str());
+                        tracing::debug!("SDK received message: type={:?}", msg_type);
 
                         match msg_type {
                             Some("control_response") => {
@@ -233,6 +236,15 @@ impl QueryFull {
                                 }
                             }
                             Some("control_request") => {
+                                let subtype = message
+                                    .get("request")
+                                    .and_then(|r| r.get("subtype"))
+                                    .and_then(|v| v.as_str());
+                                tracing::info!(
+                                    "SDK received control_request: subtype={:?}",
+                                    subtype
+                                );
+
                                 // Handle incoming control request (e.g., hook callback, MCP message, can_use_tool)
                                 let stdin_clone = stdin.clone();
                                 let hook_callbacks_clone = Arc::clone(&hook_callbacks);
@@ -301,9 +313,12 @@ impl QueryFull {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::error!("SDK stream error: {}", e);
+                    }
                 }
             }
+            tracing::error!("SDK background reader: stream ended unexpectedly");
         });
 
         // Wait for background task to be ready before returning
