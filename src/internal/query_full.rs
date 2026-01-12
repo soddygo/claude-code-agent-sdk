@@ -342,6 +342,12 @@ impl QueryFull {
         can_use_tool: Arc<Mutex<Option<CanUseToolCallback>>>,
     ) -> Result<()> {
         let request_id = request.request_id.clone();
+        let subtype = request
+            .request
+            .get("subtype")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         // Try to process the request and send appropriate response
         let result =
@@ -374,6 +380,14 @@ impl QueryFull {
                 })
             }
         };
+
+        // Log response for debugging
+        tracing::info!(
+            "Sending control response: subtype={}, request_id={}, response={:?}",
+            subtype,
+            request_id,
+            response
+        );
 
         // Send response back to CLI
         Self::write_to_stdin(&stdin, &response).await
@@ -479,6 +493,13 @@ impl QueryFull {
 
                 // Call the hook
                 let hook_output = callback(hook_input, tool_use_id, context).await;
+
+                // Log hook output for debugging
+                tracing::info!(
+                    "Hook callback completed: callback_id={}, output={:?}",
+                    callback_id,
+                    hook_output
+                );
 
                 // Convert to JSON
                 serde_json::to_value(&hook_output).map_err(|e| {
