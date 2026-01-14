@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -61,11 +62,11 @@ pub struct SubprocessTransport {
     cwd: Option<PathBuf>,
     options: ClaudeAgentOptions,
     prompt: QueryPrompt,
-    process: Option<Child>,
+    process: Arc<Mutex<Option<Child>>>,
     pub(crate) stdin: Arc<Mutex<Option<ChildStdin>>>,
     pub(crate) stdout: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
     max_buffer_size: usize,
-    ready: bool,
+    ready: Arc<AtomicBool>,
 }
 
 impl SubprocessTransport {
@@ -101,11 +102,11 @@ impl SubprocessTransport {
             cwd,
             options,
             prompt,
-            process: None,
+            process: Arc::new(Mutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
             stdout: Arc::new(Mutex::new(None)),
             max_buffer_size,
-            ready: false,
+            ready: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -219,8 +220,12 @@ impl SubprocessTransport {
         let mut args = vec![
             "--output-format".to_string(),
             "stream-json".to_string(),
-            "--verbose".to_string(),
         ];
+
+        // Only add --verbose if enabled
+        if self.options.verbose {
+            args.push("--verbose".to_string());
+        }
 
         // For streaming mode or content mode, enable stream-json input
         if matches!(
@@ -528,6 +533,11 @@ impl SubprocessTransport {
             return Ok(());
         }
 
+        // Skip if configured in options
+        if self.options.skip_version_check {
+            return Ok(());
+        }
+
         let output = Command::new(&self.cli_path)
             .arg("--version")
             .output()
@@ -648,8 +658,8 @@ impl Transport for SubprocessTransport {
 
         *self.stdin.lock().await = Some(stdin);
         *self.stdout.lock().await = Some(BufReader::new(stdout));
-        self.process = Some(child);
-        self.ready = true;
+        *self.process.lock().await = Some(child);
+        self.ready.store(true, Ordering::Release);
 
         // Send initial prompt based on type
         match &self.prompt {
@@ -771,7 +781,7 @@ impl Transport for SubprocessTransport {
         }
 
         // Wait for process to exit
-        if let Some(mut process) = self.process.take() {
+        if let Some(mut process) = self.process.lock().await.take() {
             let status = process.wait().await.map_err(|e| {
                 ClaudeError::Process(ProcessError::new(
                     format!("Failed to wait for process: {}", e),
@@ -789,12 +799,12 @@ impl Transport for SubprocessTransport {
             }
         }
 
-        self.ready = false;
+        self.ready.store(false, Ordering::Release);
         Ok(())
     }
 
     fn is_ready(&self) -> bool {
-        self.ready
+        self.ready.load(Ordering::Relaxed)
     }
 
     async fn end_input(&mut self) -> Result<()> {
@@ -810,8 +820,18 @@ impl Transport for SubprocessTransport {
 
 impl Drop for SubprocessTransport {
     fn drop(&mut self) {
-        if let Some(mut process) = self.process.take() {
-            let _ = process.start_kill();
+        match self.process.try_lock() {
+            Ok(mut guard) => {
+                if let Some(mut process) = guard.take() {
+                    debug!("Terminating Claude CLI process in Drop");
+                    let _ = process.start_kill();
+                }
+            }
+            Err(_) => {
+                // Lock is held by another task, process will be cleaned up by OS
+                // This is safe - tokio will ensure the process is reaped
+                warn!("Failed to acquire process lock in Drop, OS will clean up the process");
+            }
         }
     }
 }

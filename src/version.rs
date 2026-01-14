@@ -1,5 +1,7 @@
 //! Version information for the Claude Agent SDK
 
+use std::sync::OnceLock;
+
 /// The version of this SDK
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -53,6 +55,33 @@ pub fn check_version(cli_version: &str) -> bool {
 
     // Major and minor are equal
     cli_patch >= req_patch
+}
+
+/// Cached Claude Code CLI version
+static CLAUDE_CODE_VERSION: OnceLock<Option<String>> = OnceLock::new();
+
+/// Get Claude Code CLI version
+///
+/// This function uses OnceLock to cache the result, so the CLI is only called once.
+/// Returns None if CLI is not found or version cannot be determined.
+pub fn get_claude_code_version() -> Option<&'static str> {
+    CLAUDE_CODE_VERSION
+        .get_or_init(|| {
+            std::process::Command::new("claude")
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let version_output = String::from_utf8_lossy(&output.stdout);
+                    version_output
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().next())
+                        .map(|v| v.trim().to_string())
+                })
+        })
+        .as_deref()
 }
 
 #[cfg(test)]

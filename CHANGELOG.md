@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 ---
+## [Unreleased]
+
+### Features
+
+- add efficiency hooks for execution optimization tracking (sync from upstream v0.6.2)
+  - Track execution metrics (tool calls, edits per file, build attempts, etc.)
+  - Inject working directory reminders at prompt submission
+  - Provide efficiency feedback and warnings when execution stops
+  - Add `EfficiencyConfig` with presets: `enabled()`, `cwd_reminder_only()`, `with_metrics()`
+  - Add example: `24_efficiency_hooks.rs`
+
+- add performance optimizations from upstream v0.6.0
+  - Remove JSON clone in `MessageParser::parse()` - reduces memory allocation by ~50%
+  - Add `skip_version_check` configuration option - saves 100-500ms on connection
+  - Add `verbose` configuration option - reduces CLI logging overhead when disabled
+  - Add `get_claude_code_version()` function with `OnceLock` caching
+
+- improve transport layer concurrency
+  - Use `Arc<AtomicBool>` for `ready` state - enables lock-free concurrent reads
+  - Wrap `process` in `Arc<Mutex<>>` - ensures safe cross-task access
+
+### Bug Fixes
+
+- improve Drop trait in SubprocessTransport with proper error handling and logging
+
+---
 ## [0.5.0](https://github.com/compare/v0.4.0..v0.5.0) - 2026-01-04
 
 ### Bug Fixes

@@ -9,8 +9,12 @@ pub struct MessageParser;
 impl MessageParser {
     /// Parse a JSON value into a Message
     pub fn parse(data: serde_json::Value) -> Result<Message> {
-        serde_json::from_value(data.clone()).map_err(|e| {
-            MessageParseError::new(format!("Failed to parse message: {}", e), Some(data)).into()
+        serde_json::from_value(data).map_err(|e| {
+            MessageParseError::new(
+                format!("Failed to parse message: {}", e),
+                None, // 不包含原始数据以避免克隆开销
+            )
+            .into()
         })
     }
 }

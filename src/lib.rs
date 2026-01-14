@@ -346,6 +346,7 @@ pub mod version;
 pub use errors::{ClaudeError, ImageValidationError, Result};
 pub use types::{
     config::*,
+    efficiency::EfficiencyConfig,
     hooks::*,
     mcp::{
         // ACP tool name prefix support
@@ -371,3 +372,4 @@ pub use types::{
 // Re-export public API
 pub use client::ClaudeClient;
 pub use query::{query, query_stream, query_stream_with_content, query_with_content};
+pub use version::{get_claude_code_version, SDK_VERSION};

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use typed_builder::TypedBuilder;
 
+use super::efficiency::EfficiencyConfig;
 use super::hooks::{HookEvent, HookMatcher};
 use super::mcp::McpServers;
 use super::permissions::CanUseToolCallback;
@@ -134,6 +135,17 @@ pub struct ClaudeAgentOptions {
     /// Set to `None` to disable timeout (not recommended).
     #[builder(default = Some(Duration::from_secs(60)))]
     pub control_request_timeout: Option<Duration>,
+    /// Skip CLI version check (default: false)
+    /// Set to true to skip version compatibility check, saving about 100-500ms
+    #[builder(default = false)]
+    pub skip_version_check: bool,
+    /// Enable verbose CLI output (default: true)
+    /// Set to false to potentially improve throughput by reducing CLI logging overhead
+    #[builder(default = true)]
+    pub verbose: bool,
+    /// Efficiency tracking and hook injection configuration
+    #[builder(default, setter(strip_option))]
+    pub efficiency: Option<EfficiencyConfig>,
 }
 
 impl Default for ClaudeAgentOptions {
