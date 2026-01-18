@@ -69,7 +69,6 @@ pub struct SubprocessTransport {
     /// Circular buffer for transport message reading
     /// Uses ringbuf for automatic old data recycling
     buffer: Arc<Mutex<CircularBuffer>>,
-    max_buffer_size: usize,
     ready: Arc<AtomicBool>,
 }
 
@@ -111,7 +110,6 @@ impl SubprocessTransport {
             stdin: Arc::new(Mutex::new(None)),
             stdout: Arc::new(Mutex::new(None)),
             buffer,
-            max_buffer_size,
             ready: Arc::new(AtomicBool::new(false)),
         })
     }

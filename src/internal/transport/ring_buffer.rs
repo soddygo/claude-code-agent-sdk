@@ -15,6 +15,9 @@ const DEFAULT_BUFFER_CAPACITY: usize = 20 * 1024 * 1024; // 20MB
 pub struct CircularBuffer {
     /// The underlying ring buffer
     rb: HeapRb<u8>,
+    /// Partial line data that has been read but doesn't have a newline yet
+    /// This preserves data between calls to read_line()
+    partial: Vec<u8>,
 }
 
 impl CircularBuffer {
@@ -22,6 +25,7 @@ impl CircularBuffer {
     pub fn new(capacity: usize) -> Self {
         Self {
             rb: HeapRb::new(capacity),
+            partial: Vec::new(),
         }
     }
 
@@ -35,7 +39,22 @@ impl CircularBuffer {
     /// Returns the number of bytes written.
     /// When buffer is full, oldest data is automatically overwritten.
     pub fn write(&mut self, data: &[u8]) -> usize {
-        let (mut prod, _) = self.rb.split_ref();
+        let (mut prod, cons) = self.rb.split_ref();
+
+        // Check buffer health before writing
+        let occupied = cons.occupied_len();
+        let capacity: usize = prod.capacity().into();
+        if occupied > 0 {
+            let usage_percent = (occupied * 100) / capacity;
+            if usage_percent >= 90 {
+                tracing::warn!(
+                    "Circular buffer at {}% capacity ({} bytes), old data may be overwritten",
+                    usage_percent,
+                    occupied
+                );
+            }
+        }
+
         // Use push_slice to write all data, overwriting if necessary
         let written = prod.push_slice(data);
         written
@@ -62,25 +81,32 @@ impl CircularBuffer {
     /// Read until a newline character
     ///
     /// Returns Ok(Some(line)) if a complete line was found,
-    /// Ok(None) if no data is available, or Err on error.
+    /// Ok(None) if no data is available (including partial data waiting for more),
+    /// or Err on error.
+    ///
+    /// Note: Partial data (without newline) is preserved internally for the next call.
     pub fn read_line(&mut self) -> io::Result<Option<Vec<u8>>> {
         let (_, mut cons) = self.rb.split_ref();
-        let mut line = Vec::new();
-        let mut found_data = false;
+
+        // Start with any partial data from previous call
+        let mut line = self.partial.drain(..).collect::<Vec<_>>();
+        let mut found_data = !line.is_empty();
 
         loop {
             match cons.try_pop() {
                 Some(byte) => {
                     found_data = true;
                     if byte == b'\n' {
+                        // Complete line found
                         return Ok(Some(line));
                     }
                     line.push(byte);
                 }
                 None => {
                     if found_data {
-                        // We read some data but didn't find a newline yet
-                        // This is incomplete data, return None to signal "wait for more"
+                        // We have some data but no newline yet
+                        // Save it for next call and return None
+                        self.partial = line;
                         return Ok(None);
                     }
                     // No data at all
@@ -128,9 +154,22 @@ mod tests {
         assert_eq!(cb.write(b"hello"), 5);
         // No newline yet, should return None (wait for more data)
         assert_eq!(cb.read_line().unwrap(), None);
-        // Add newline
+        // Add newline - should now get the complete line
         assert_eq!(cb.write(b"\n"), 1);
         assert_eq!(cb.read_line().unwrap(), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn test_circular_buffer_partial_line_preserved() {
+        let mut cb = CircularBuffer::new(100);
+        // Write partial data
+        assert_eq!(cb.write(b"hello"), 5);
+        // First read returns None, but preserves data
+        assert_eq!(cb.read_line().unwrap(), None);
+        // Add more data
+        assert_eq!(cb.write(b" world\n"), 7);
+        // Should get complete line including the partial data
+        assert_eq!(cb.read_line().unwrap(), Some(b"hello world".to_vec()));
     }
 
     #[test]
@@ -179,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_default_capacity() {
-        let cb = CircularBuffer::with_default_capacity();
+        let mut cb = CircularBuffer::with_default_capacity();
         assert_eq!(cb.capacity(), DEFAULT_BUFFER_CAPACITY);
     }
 }
