@@ -83,6 +83,9 @@ pub struct QueryFull {
     query_receivers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<serde_json::Value>>>>,
     // Counter for generating unique query IDs
     next_query_id: AtomicU64,
+    // Current active query_id for routing ResultMessages
+    // This ensures ResultMessages go to the most recent query
+    current_query_id: Arc<Mutex<Option<String>>>,
 }
 
 impl QueryFull {
@@ -105,6 +108,7 @@ impl QueryFull {
             control_request_timeout: Some(DEFAULT_CONTROL_REQUEST_TIMEOUT),
             query_receivers: Arc::new(Mutex::new(HashMap::new())),
             next_query_id: AtomicU64::new(0),
+            current_query_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -151,6 +155,8 @@ impl QueryFull {
     /// Register a query-specific receiver
     ///
     /// This creates an isolated message channel for a specific query.
+    /// The query_id is also tracked as the "current" query for routing
+    /// ResultMessages that don't have an explicit query_id.
     ///
     /// # Returns
     ///
@@ -160,7 +166,11 @@ impl QueryFull {
         query_id: String,
     ) -> mpsc::UnboundedReceiver<serde_json::Value> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.query_receivers.lock().await.insert(query_id, tx);
+        self.query_receivers.lock().await.insert(query_id.clone(), tx);
+
+        // Set this as the current active query_id for ResultMessage routing
+        *self.current_query_id.lock().await = Some(query_id);
+
         rx
     }
 
@@ -248,6 +258,7 @@ impl QueryFull {
         let message_tx = self.message_tx.clone();
         let stdin = self.stdin.clone();
         let query_receivers = Arc::clone(&self.query_receivers);
+        let current_query_id = Arc::clone(&self.current_query_id);
 
         // Create a channel to signal when background task is ready
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -367,20 +378,45 @@ impl QueryFull {
                                 // Try to route to a specific query receiver
                                 let receivers = query_receivers.lock().await;
                                 if !receivers.is_empty() {
-                                    // Clone message for query routing (original will be used for fallback)
-                                    let message_clone = message.clone();
-
-                                    // For ResultMessage, route to current query
+                                    // For ResultMessage, route to current active query
                                     if msg_type == Some("result") {
-                                        // ResultMessages should go to the current query
+                                        // ResultMessages should go to the current active query
+                                        // to prevent late-arriving messages from being consumed
+                                        // by the wrong prompt
                                         drop(receivers);
 
-                                        // Try to send to a query receiver
-                                        let receivers = query_receivers.lock().await;
-                                        if let Some((_, tx)) = receivers.iter().next() {
-                                            if tx.send(message_clone).is_ok() {
-                                                routed = true;
-                                                tracing::trace!("Routed ResultMessage to current query receiver");
+                                        // Get the current active query_id
+                                        let current_id = current_query_id.lock().await.clone();
+
+                                        if let Some(active_query_id) = current_id {
+                                            let receivers = query_receivers.lock().await;
+                                            if let Some(tx) = receivers.get(&active_query_id) {
+                                                if tx.send(message.clone()).is_ok() {
+                                                    routed = true;
+                                                    tracing::trace!(
+                                                        query_id = %active_query_id,
+                                                        "Routed ResultMessage to current active query receiver"
+                                                    );
+                                                } else {
+                                                    // Receiver closed, fall back to first available
+                                                    tracing::warn!(
+                                                        query_id = %active_query_id,
+                                                        "Current query receiver closed, trying fallback"
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        // Fallback: if current receiver failed, try any available receiver
+                                        if !routed {
+                                            let receivers = query_receivers.lock().await;
+                                            if let Some((_, tx)) = receivers.iter().next() {
+                                                if tx.send(message.clone()).is_ok() {
+                                                    routed = true;
+                                                    tracing::warn!(
+                                                        "Routed ResultMessage to fallback receiver (may indicate race condition)"
+                                                    );
+                                                }
                                             }
                                         }
                                     } else {
@@ -390,7 +426,7 @@ impl QueryFull {
                                         let receivers = query_receivers.lock().await;
                                         let mut send_count = 0;
                                         for (_, tx) in receivers.iter() {
-                                            if tx.send(message_clone.clone()).is_ok() {
+                                            if tx.send(message.clone()).is_ok() {
                                                 send_count += 1;
                                             }
                                         }
@@ -439,6 +475,7 @@ impl QueryFull {
     /// when streams are dropped without explicit cleanup.
     fn start_cleanup_task(&self) {
         let query_receivers = Arc::clone(&self.query_receivers);
+        let current_query_id = Arc::clone(&self.current_query_id);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -446,21 +483,49 @@ impl QueryFull {
             loop {
                 interval.tick().await;
 
-                let mut receivers = query_receivers.lock().await;
-                let before_count = receivers.len();
+                // Collect removed query_ids to check if we need to clear current_query_id
+                let mut removed_query_ids = Vec::new();
 
-                // Remove receivers where the sender is closed (receiver was dropped)
-                receivers.retain(|_, tx| tx.is_closed() == false);
+                {
+                    let mut receivers = query_receivers.lock().await;
+                    let before_count = receivers.len();
 
-                let after_count = receivers.len();
-                let removed = before_count - after_count;
+                    // Collect query_ids that will be removed
+                    for (query_id, tx) in receivers.iter() {
+                        if tx.is_closed() {
+                            removed_query_ids.push(query_id.clone());
+                        }
+                    }
 
-                if removed > 0 {
-                    debug!(
-                        removed_receivers = removed,
-                        active_receivers = after_count,
-                        "Cleaned up stale query receivers"
-                    );
+                    // Remove receivers where the sender is closed (receiver was dropped)
+                    receivers.retain(|_, tx| tx.is_closed() == false);
+
+                    let after_count = receivers.len();
+                    let removed = before_count - after_count;
+
+                    if removed > 0 {
+                        debug!(
+                            removed_receivers = removed,
+                            active_receivers = after_count,
+                            "Cleaned up stale query receivers"
+                        );
+                    }
+                }
+
+                // Clear current_query_id if it was among the removed receivers
+                if !removed_query_ids.is_empty() {
+                    // Clone the current value to check without holding lock
+                    let current_value = current_query_id.lock().await.clone();
+                    if let Some(current) = current_value {
+                        if removed_query_ids.contains(&current) {
+                            let mut current_id = current_query_id.lock().await;
+                            *current_id = None;
+                            debug!(
+                                query_id = %current,
+                                "Cleared current_query_id (receiver was cleaned up)"
+                            );
+                        }
+                    }
                 }
             }
         });
@@ -1265,5 +1330,132 @@ mod tests {
         assert_eq!(*received_tool_name.lock().await, "Write");
         assert_eq!(received_input.lock().await["path"], "/tmp/test.txt");
         assert_eq!(received_input.lock().await["content"], "hello");
+    }
+
+    // ========================================================================
+    // Query-Scoped Message Channel Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_generate_query_id_unique() {
+        use crate::internal::transport::subprocess::SubprocessTransport;
+
+        // Create a QueryFull instance (using a mock transport)
+        let transport = SubprocessTransport::new(
+            crate::internal::transport::subprocess::QueryPrompt::Streaming,
+            crate::types::config::ClaudeAgentOptions::default(),
+        )
+        .unwrap();
+
+        let query = QueryFull::new(Box::new(transport));
+
+        // Generate multiple query IDs and verify they are unique
+        let id1 = query.generate_query_id();
+        let id2 = query.generate_query_id();
+        let id3 = query.generate_query_id();
+
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+
+        // Verify format: query_<counter>_<uuid>
+        assert!(id1.starts_with("query_"));
+        assert!(id2.starts_with("query_"));
+        assert!(id3.starts_with("query_"));
+    }
+
+    #[tokio::test]
+    async fn test_register_query_receiver_sets_current() {
+        use crate::internal::transport::subprocess::SubprocessTransport;
+
+        let transport = SubprocessTransport::new(
+            crate::internal::transport::subprocess::QueryPrompt::Streaming,
+            crate::types::config::ClaudeAgentOptions::default(),
+        )
+        .unwrap();
+
+        let query = QueryFull::new(Box::new(transport));
+
+        // Register first receiver
+        let id1 = query.generate_query_id();
+        let _rx1 = query.register_query_receiver(id1.clone()).await;
+
+        // Verify current_query_id is set to id1
+        let current = query.current_query_id.lock().await;
+        assert_eq!(current.as_ref(), Some(&id1));
+
+        // Register second receiver
+        let id2 = query.generate_query_id();
+        let _rx2 = query.register_query_receiver(id2.clone()).await;
+
+        // Verify current_query_id is updated to id2
+        let current = query.current_query_id.lock().await;
+        assert_eq!(current.as_ref(), Some(&id2));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_receivers_in_map() {
+        use crate::internal::transport::subprocess::SubprocessTransport;
+        use tokio::sync::mpsc;
+
+        let transport = SubprocessTransport::new(
+            crate::internal::transport::subprocess::QueryPrompt::Streaming,
+            crate::types::config::ClaudeAgentOptions::default(),
+        )
+        .unwrap();
+
+        let query = QueryFull::new(Box::new(transport));
+
+        // Register multiple receivers
+        let id1 = query.generate_query_id();
+        let id2 = query.generate_query_id();
+        let id3 = query.generate_query_id();
+
+        let _rx1 = query.register_query_receiver(id1.clone()).await;
+        let _rx2 = query.register_query_receiver(id2.clone()).await;
+        let _rx3 = query.register_query_receiver(id3.clone()).await;
+
+        // Verify all receivers are in the map
+        let receivers = query.query_receivers.lock().await;
+        assert_eq!(receivers.len(), 3);
+        assert!(receivers.contains_key(&id1));
+        assert!(receivers.contains_key(&id2));
+        assert!(receivers.contains_key(&id3));
+
+        // Verify current_query_id is the last one registered
+        let current = query.current_query_id.lock().await;
+        assert_eq!(current.as_ref(), Some(&id3));
+    }
+
+    #[tokio::test]
+    async fn test_current_query_id_updates_on_new_registration() {
+        use crate::internal::transport::subprocess::SubprocessTransport;
+
+        let transport = SubprocessTransport::new(
+            crate::internal::transport::subprocess::QueryPrompt::Streaming,
+            crate::types::config::ClaudeAgentOptions::default(),
+        )
+        .unwrap();
+
+        let query = QueryFull::new(Box::new(transport));
+
+        // Simulate concurrent query scenario:
+        // Query A starts and registers
+        // Query B starts and registers (should become current)
+        // ResultMessage should go to B (the most recent/current)
+
+        let id_a = query.generate_query_id();
+        let id_b = query.generate_query_id();
+
+        let _rx_a = query.register_query_receiver(id_a.clone()).await;
+        let current_after_a = query.current_query_id.lock().await;
+        assert_eq!(current_after_a.as_ref(), Some(&id_a));
+
+        let _rx_b = query.register_query_receiver(id_b.clone()).await;
+        let current_after_b = query.current_query_id.lock().await;
+        assert_eq!(current_after_b.as_ref(), Some(&id_b));
+
+        // current_query_id should now be id_b, not id_a
+        assert_ne!(current_after_b.as_ref(), Some(&id_a));
     }
 }
