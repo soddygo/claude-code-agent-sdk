@@ -6,8 +6,6 @@
 use ringbuf::{traits::*, HeapRb};
 use std::io;
 
-const DEFAULT_BUFFER_CAPACITY: usize = 20 * 1024 * 1024; // 20MB
-
 /// Circular buffer wrapper using ringbuf
 ///
 /// This provides a fixed-size buffer that automatically overwrites old data
@@ -27,11 +25,6 @@ impl CircularBuffer {
             rb: HeapRb::new(capacity),
             partial: Vec::new(),
         }
-    }
-
-    /// Create a new circular buffer with default capacity (20MB)
-    pub fn with_default_capacity() -> Self {
-        Self::new(DEFAULT_BUFFER_CAPACITY)
     }
 
     /// Write data to the buffer (overwrites old data when full)
@@ -57,24 +50,6 @@ impl CircularBuffer {
 
         // Use push_slice to write all data, overwriting if necessary
         let written = prod.push_slice(data);
-        written
-    }
-
-    /// Try to write data without overwriting
-    ///
-    /// Returns the number of bytes written. If the buffer is full,
-    /// stops writing instead of overwriting.
-    pub fn try_write(&mut self, data: &[u8]) -> usize {
-        let (mut prod, _) = self.rb.split_ref();
-        let mut written = 0;
-
-        for &byte in data {
-            match prod.try_push(byte) {
-                Ok(()) => written += 1,
-                Err(_) => break, // Buffer full, stop writing
-            }
-        }
-
         written
     }
 
@@ -114,25 +89,6 @@ impl CircularBuffer {
                 }
             }
         }
-    }
-
-    /// Get the number of bytes available to read
-    pub fn len(&mut self) -> usize {
-        let (_, cons) = self.rb.split_ref();
-        cons.occupied_len()
-    }
-
-    /// Check if the buffer is empty
-    pub fn is_empty(&mut self) -> bool {
-        let (_, cons) = self.rb.split_ref();
-        cons.is_empty()
-    }
-
-    /// Get the total capacity of the buffer
-    pub fn capacity(&mut self) -> usize {
-        let (_, cons) = self.rb.split_ref();
-        // capacity() returns NonZero<usize>, convert to usize
-        cons.capacity().into()
     }
 }
 
@@ -200,25 +156,5 @@ mod tests {
         let result = cb.read_line().unwrap();
         // We may not get a complete line due to overwriting
         assert!(result.is_some() || result.is_none());
-    }
-
-    #[test]
-    fn test_try_write() {
-        let mut cb = CircularBuffer::new(10);
-        // Fill the buffer
-        let written = cb.try_write(b"0123456789AB");
-        // ringbuf capacity is exactly the size we set
-        // So we should be able to write 10 bytes
-        assert_eq!(written, 10);
-
-        // Try to write more - should fail because buffer is full
-        let more = cb.try_write(b"CD");
-        assert_eq!(more, 0);
-    }
-
-    #[test]
-    fn test_default_capacity() {
-        let mut cb = CircularBuffer::with_default_capacity();
-        assert_eq!(cb.capacity(), DEFAULT_BUFFER_CAPACITY);
     }
 }

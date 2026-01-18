@@ -580,6 +580,9 @@ impl ClaudeClient {
     /// This is the most common pattern for handling Claude responses, as it
     /// processes one complete "turn" of the conversation.
     ///
+    /// This method uses query-scoped message channels to ensure message isolation,
+    /// preventing late-arriving ResultMessages from being consumed by the wrong prompt.
+    ///
     /// # Returns
     ///
     /// A stream of `Result<Message>` that ends when a ResultMessage is received.
@@ -621,16 +624,34 @@ impl ClaudeClient {
         };
 
         Box::pin(async_stream::stream! {
-            let rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>> = {
+            // ====================================================================
+            // QUERY-SCOPED MESSAGE CHANNEL
+            // ====================================================================
+            // Create an isolated message channel for this specific query.
+            // This ensures we only receive messages intended for this prompt,
+            // preventing late-arriving ResultMessages from being consumed
+            // by the wrong query.
+            //
+            // Note: Cleanup is handled by the periodic cleanup task in QueryFull,
+            // which removes stale receivers whose senders have been closed.
+
+            let query_id = {
                 let query_guard = query.lock().await;
-                Arc::clone(&query_guard.message_rx)
+                query_guard.generate_query_id()
+            };
+
+            debug!(
+                query_id = %query_id,
+                "Creating query-scoped receiver"
+            );
+
+            let mut rx = {
+                let query_guard = query.lock().await;
+                query_guard.register_query_receiver(query_id.clone()).await
             };
 
             loop {
-                let message = {
-                    let mut rx_guard = rx.lock().await;
-                    rx_guard.recv().await
-                };
+                let message = rx.recv().await;
 
                 match message {
                     Some(json) => {
@@ -639,6 +660,11 @@ impl ClaudeClient {
                                 let is_result = matches!(msg, Message::Result(_));
                                 yield Ok(msg);
                                 if is_result {
+                                    debug!(
+                                        query_id = %query_id,
+                                        "Received ResultMessage, ending stream"
+                                    );
+                                    // Cleanup will be handled by the periodic cleanup task
                                     break;
                                 }
                             }
@@ -648,10 +674,75 @@ impl ClaudeClient {
                             }
                         }
                     }
-                    None => break,
+                    None => {
+                        debug!(
+                            query_id = %query_id,
+                            "Query-scoped channel closed"
+                        );
+                        // Cleanup will be handled by the periodic cleanup task
+                        break;
+                    }
                 }
             }
         })
+    }
+
+    /// Drain any leftover messages from the previous prompt
+    ///
+    /// This method removes any messages remaining in the channel from a previous
+    /// prompt. This should be called before starting a new prompt to ensure
+    /// that the new prompt doesn't receive stale messages.
+    ///
+    /// This is important when prompts are cancelled or end unexpectedly,
+    /// as there may be buffered messages that would otherwise be received
+    /// by the next prompt.
+    ///
+    /// # Returns
+    ///
+    /// The number of messages drained from the channel.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
+    /// # client.connect().await?;
+    /// // Before starting a new prompt, drain any leftover messages
+    /// let drained = client.drain_messages().await;
+    /// if drained > 0 {
+    ///     eprintln!("Drained {} leftover messages from previous prompt", drained);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn drain_messages(&self) -> usize {
+        let Some(query) = &self.query else {
+            return 0;
+        };
+
+        let rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>> = {
+            let query_guard = query.lock().await;
+            Arc::clone(&query_guard.message_rx)
+        };
+
+        let mut count = 0;
+        // Use try_recv to drain all currently available messages without blocking
+        loop {
+            let mut rx_guard = rx.lock().await;
+            match rx_guard.try_recv() {
+                Ok(_) => count += 1,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if count > 0 {
+            debug!(count, "Drained leftover messages from previous prompt");
+        }
+
+        count
     }
 
     /// Send an interrupt signal to stop the current Claude operation

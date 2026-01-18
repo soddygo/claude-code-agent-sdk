@@ -26,7 +26,7 @@ use crate::version::{
 use super::ring_buffer::CircularBuffer;
 use super::Transport;
 
-const DEFAULT_MAX_BUFFER_SIZE: usize = 10 * 1024 * 1024; // 10MB
+const DEFAULT_MAX_BUFFER_SIZE: usize = 20 * 1024 * 1024; // 20MB
 
 /// Query prompt type
 #[derive(Clone)]

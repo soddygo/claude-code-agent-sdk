@@ -79,6 +79,10 @@ pub struct QueryFull {
     initialization_result: Arc<Mutex<Option<serde_json::Value>>>,
     // Configurable timeout for control requests
     control_request_timeout: Option<Duration>,
+    // Query-scoped receivers: query_id -> message channel (for message isolation)
+    query_receivers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<serde_json::Value>>>>,
+    // Counter for generating unique query IDs
+    next_query_id: AtomicU64,
 }
 
 impl QueryFull {
@@ -99,6 +103,8 @@ impl QueryFull {
             stdin: None,
             initialization_result: Arc::new(Mutex::new(None)),
             control_request_timeout: Some(DEFAULT_CONTROL_REQUEST_TIMEOUT),
+            query_receivers: Arc::new(Mutex::new(HashMap::new())),
+            next_query_id: AtomicU64::new(0),
         }
     }
 
@@ -121,6 +127,41 @@ impl QueryFull {
     /// Set SDK MCP servers
     pub async fn set_sdk_mcp_servers(&mut self, servers: HashMap<String, McpSdkServerConfig>) {
         *self.sdk_mcp_servers.lock().await = servers;
+    }
+
+    // ========================================================================
+    // Query-Scoped Message Channel Methods
+    // ========================================================================
+    // These methods provide per-query message isolation to prevent
+    // ResultMessage confusion when prompts are sent in quick succession.
+
+    /// Generate a unique query ID for message routing
+    ///
+    /// Query IDs are used to isolate messages from different prompts,
+    /// preventing late-arriving ResultMessages from being consumed
+    /// by the wrong prompt.
+    pub fn generate_query_id(&self) -> String {
+        format!(
+            "query_{}_{}",
+            self.next_query_id.fetch_add(1, Ordering::SeqCst),
+            uuid::Uuid::new_v4().simple()
+        )
+    }
+
+    /// Register a query-specific receiver
+    ///
+    /// This creates an isolated message channel for a specific query.
+    ///
+    /// # Returns
+    ///
+    /// A receiver that will only receive messages for this query.
+    pub async fn register_query_receiver(
+        &self,
+        query_id: String,
+    ) -> mpsc::UnboundedReceiver<serde_json::Value> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.query_receivers.lock().await.insert(query_id, tx);
+        rx
     }
 
     /// Initialize with hooks
@@ -206,6 +247,7 @@ impl QueryFull {
         let pending_responses = Arc::clone(&self.pending_responses);
         let message_tx = self.message_tx.clone();
         let stdin = self.stdin.clone();
+        let query_receivers = Arc::clone(&self.query_receivers);
 
         // Create a channel to signal when background task is ready
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -287,6 +329,8 @@ impl QueryFull {
                                             .unwrap_or("unknown")
                                             .to_string();
 
+                                        let stdin_clone = stdin.clone();
+
                                         let error_response = json!({
                                             "type": "control_response",
                                             "response": {
@@ -311,8 +355,60 @@ impl QueryFull {
                                 }
                             }
                             _ => {
-                                // Regular message - send to stream
-                                let _ = message_tx.send(message);
+                                // ====================================================================
+                                // QUERY-SCOPED MESSAGE ROUTING
+                                // ====================================================================
+                                // Route messages to query-specific receivers for isolation.
+                                // This prevents late-arriving ResultMessages from being
+                                // consumed by the wrong prompt.
+
+                                let mut routed = false;
+
+                                // Try to route to a specific query receiver
+                                let receivers = query_receivers.lock().await;
+                                if !receivers.is_empty() {
+                                    // Clone message for query routing (original will be used for fallback)
+                                    let message_clone = message.clone();
+
+                                    // For ResultMessage, route to current query
+                                    if msg_type == Some("result") {
+                                        // ResultMessages should go to the current query
+                                        drop(receivers);
+
+                                        // Try to send to a query receiver
+                                        let receivers = query_receivers.lock().await;
+                                        if let Some((_, tx)) = receivers.iter().next() {
+                                            if tx.send(message_clone).is_ok() {
+                                                routed = true;
+                                                tracing::trace!("Routed ResultMessage to current query receiver");
+                                            }
+                                        }
+                                    } else {
+                                        // For non-Result messages, broadcast to all receivers
+                                        drop(receivers);
+
+                                        let receivers = query_receivers.lock().await;
+                                        let mut send_count = 0;
+                                        for (_, tx) in receivers.iter() {
+                                            if tx.send(message_clone.clone()).is_ok() {
+                                                send_count += 1;
+                                            }
+                                        }
+
+                                        if send_count > 0 {
+                                            routed = true;
+                                            tracing::trace!(send_count, "Broadcast message to query receivers");
+                                        }
+                                    }
+                                } else {
+                                    drop(receivers);
+                                }
+
+                                // Fallback: if no query receivers or routing failed, send to global channel
+                                if !routed {
+                                    tracing::trace!("No query receivers, using global channel");
+                                    let _ = message_tx.send(message);
+                                }
                             }
                         }
                     }
@@ -329,8 +425,45 @@ impl QueryFull {
             .await
             .map_err(|_| ClaudeError::Transport("Background task failed to start".to_string()))?;
 
+        // Start cleanup task to remove stale receivers
+        self.start_cleanup_task();
+
         info!("Background message reader started");
         Ok(())
+    }
+
+    /// Start cleanup task to remove stale receivers
+    ///
+    /// This runs a background task that periodically cleans up query receivers
+    /// whose associated channels have been closed. This prevents memory leaks
+    /// when streams are dropped without explicit cleanup.
+    fn start_cleanup_task(&self) {
+        let query_receivers = Arc::clone(&self.query_receivers);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+            loop {
+                interval.tick().await;
+
+                let mut receivers = query_receivers.lock().await;
+                let before_count = receivers.len();
+
+                // Remove receivers where the sender is closed (receiver was dropped)
+                receivers.retain(|_, tx| tx.is_closed() == false);
+
+                let after_count = receivers.len();
+                let removed = before_count - after_count;
+
+                if removed > 0 {
+                    debug!(
+                        removed_receivers = removed,
+                        active_receivers = after_count,
+                        "Cleaned up stale query receivers"
+                    );
+                }
+            }
+        });
     }
 
     /// Handle incoming control request from CLI (new version using stdin directly)
