@@ -23,6 +23,7 @@ use crate::version::{
     ENTRYPOINT, MIN_CLI_VERSION, SDK_VERSION, SKIP_VERSION_CHECK_ENV, check_version,
 };
 
+use super::ring_buffer::CircularBuffer;
 use super::Transport;
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 10 * 1024 * 1024; // 10MB
@@ -65,6 +66,9 @@ pub struct SubprocessTransport {
     process: Arc<Mutex<Option<Child>>>,
     pub(crate) stdin: Arc<Mutex<Option<ChildStdin>>>,
     pub(crate) stdout: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
+    /// Circular buffer for transport message reading
+    /// Uses ringbuf for automatic old data recycling
+    buffer: Arc<Mutex<CircularBuffer>>,
     max_buffer_size: usize,
     ready: Arc<AtomicBool>,
 }
@@ -96,6 +100,7 @@ impl SubprocessTransport {
 
         let cwd = options.cwd.clone().or_else(|| std::env::current_dir().ok());
         let max_buffer_size = options.max_buffer_size.unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
+        let buffer = Arc::new(Mutex::new(CircularBuffer::new(max_buffer_size)));
 
         Ok(Self {
             cli_path,
@@ -105,6 +110,7 @@ impl SubprocessTransport {
             process: Arc::new(Mutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
             stdout: Arc::new(Mutex::new(None)),
+            buffer,
             max_buffer_size,
             ready: Arc::new(AtomicBool::new(false)),
         })
@@ -718,13 +724,12 @@ impl Transport for SubprocessTransport {
         &mut self,
     ) -> Pin<Box<dyn Stream<Item = Result<serde_json::Value>> + Send + '_>> {
         let stdout = Arc::clone(&self.stdout);
-        let max_buffer_size = self.max_buffer_size;
+        let buffer = Arc::clone(&self.buffer);
 
         Box::pin(async_stream::stream! {
             let mut stdout_guard = stdout.lock().await;
             if let Some(ref mut reader) = *stdout_guard {
                 let mut line = String::new();
-                let mut buffer_size = 0;
 
                 loop {
                     line.clear();
@@ -737,30 +742,42 @@ impl Transport for SubprocessTransport {
                         Ok(n) => {
                             if n > 0 {
                                 tracing::trace!("SDK transport: read {} bytes from CLI", n);
-                            }
-                            buffer_size += n;
-                            if buffer_size > max_buffer_size {
-                                yield Err(ClaudeError::Transport(format!(
-                                    "Buffer size exceeded maximum of {} bytes",
-                                    max_buffer_size
-                                )));
-                                break;
-                            }
 
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
+                                // Write to circular buffer (old data auto-recycled by ringbuf)
+                                buffer.lock().await.write(line.as_bytes());
 
-                            match serde_json::from_str::<serde_json::Value>(trimmed) {
-                                Ok(json) => {
-                                    yield Ok(json);
-                                }
-                                Err(e) => {
-                                    yield Err(ClaudeError::JsonDecode(JsonDecodeError::new(
-                                        format!("Failed to parse JSON: {}", e),
-                                        trimmed.to_string(),
-                                    )));
+                                // Try to read a complete line from the circular buffer
+                                match buffer.lock().await.read_line() {
+                                    Ok(Some(data)) => {
+                                        let trimmed = std::str::from_utf8(&data)
+                                            .unwrap_or("")
+                                            .trim();
+                                        if trimmed.is_empty() {
+                                            continue;
+                                        }
+
+                                        match serde_json::from_str::<serde_json::Value>(trimmed) {
+                                            Ok(json) => {
+                                                yield Ok(json);
+                                            }
+                                            Err(e) => {
+                                                yield Err(ClaudeError::JsonDecode(JsonDecodeError::new(
+                                                    format!("Failed to parse JSON: {}", e),
+                                                    trimmed.to_string(),
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        // Incomplete line in buffer, wait for more data
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        yield Err(ClaudeError::Transport(format!(
+                                            "Circular buffer error: {}", e
+                                        )));
+                                        break;
+                                    }
                                 }
                             }
                         }

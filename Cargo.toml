@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-agent-sdk"
-version = "0.1.23"
+version = "0.1.25"
 authors = ["soddygo <soddygo@qq.com>"]
 edition = "2024"
 rust-version = "1.90"
@@ -51,6 +51,9 @@ typed-builder = "0.23.2"
 
 # Macro utilities
 paste = "1.0"
+
+# Circular buffer for SDK transport
+ringbuf = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
