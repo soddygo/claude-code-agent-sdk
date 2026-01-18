@@ -6,7 +6,7 @@ use futures::stream::StreamExt;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -80,16 +80,27 @@ pub struct QueryFull {
     // Configurable timeout for control requests
     control_request_timeout: Option<Duration>,
     // Query-scoped receivers: query_id -> message channel (for message isolation)
+    // Note: This field is retained for backward compatibility but is not used
+    // in isolated QueryFull instances created via new_isolated()
     query_receivers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<serde_json::Value>>>>,
     // Counter for generating unique query IDs
     next_query_id: AtomicU64,
     // Current active query_id for routing ResultMessages
     // This ensures ResultMessages go to the most recent query
+    // Note: This field is retained for backward compatibility but is not used
+    // in isolated QueryFull instances created via new_isolated()
     current_query_id: Arc<Mutex<Option<String>>>,
+    // Flag indicating if this QueryFull is in isolated mode
+    // Isolated mode means each query has its own channels without routing
+    is_isolated: AtomicBool,
 }
 
 impl QueryFull {
     /// Create a new Query with default timeout (60 seconds)
+    ///
+    /// This creates a QueryFull in non-isolated mode, which uses
+    /// query-scoped receivers for message routing. For new code,
+    /// prefer using `new_isolated()` for complete message isolation.
     pub fn new(transport: Box<dyn Transport>) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
@@ -109,7 +120,73 @@ impl QueryFull {
             query_receivers: Arc::new(Mutex::new(HashMap::new())),
             next_query_id: AtomicU64::new(0),
             current_query_id: Arc::new(Mutex::new(None)),
+            is_isolated: AtomicBool::new(false),
         }
+    }
+
+    /// Create a new isolated Query (Codex-style architecture)
+    ///
+    /// This creates a QueryFull instance in isolated mode, where each query
+    /// has its own completely independent message channels. No routing is needed
+    /// because each QueryFull handles only one query at a time.
+    ///
+    /// This is the recommended approach for new code, as it provides:
+    /// - Complete message isolation
+    /// - No possibility of message confusion
+    /// - Simpler architecture without routing logic
+    /// - Better performance (no routing overhead)
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - The transport for this isolated query
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use claude_code_agent_sdk::internal::query_full::QueryFull;
+    /// use claude_code_agent_sdk::internal::transport::subprocess::SubprocessTransport;
+    /// use claude_code_agent_sdk::internal::transport::subprocess::QueryPrompt;
+    /// use claude_code_agent_sdk::types::config::ClaudeAgentOptions;
+    ///
+    /// let transport = SubprocessTransport::new(
+    ///     QueryPrompt::Streaming,
+    ///     ClaudeAgentOptions::default(),
+    /// ).unwrap();
+    /// let query = QueryFull::new_isolated(Box::new(transport)).unwrap();
+    /// ```
+    pub fn new_isolated(transport: Box<dyn Transport>) -> Result<Self> {
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
+
+        Ok(Self {
+            transport: Arc::new(Mutex::new(transport)),
+            hook_callbacks: Arc::new(Mutex::new(HashMap::new())),
+            sdk_mcp_servers: Arc::new(Mutex::new(HashMap::new())),
+            can_use_tool: Arc::new(Mutex::new(None)),
+            next_callback_id: Arc::new(AtomicU64::new(0)),
+            request_counter: Arc::new(AtomicU64::new(0)),
+            pending_responses: Arc::new(Mutex::new(HashMap::new())),
+            message_tx,
+            message_rx: Arc::new(Mutex::new(message_rx)),
+            stdin: None,
+            initialization_result: Arc::new(Mutex::new(None)),
+            control_request_timeout: Some(DEFAULT_CONTROL_REQUEST_TIMEOUT),
+            query_receivers: Arc::new(Mutex::new(HashMap::new())),
+            next_query_id: AtomicU64::new(0),
+            current_query_id: Arc::new(Mutex::new(None)),
+            is_isolated: AtomicBool::new(true),
+        })
+    }
+
+    /// Check if this QueryFull is still active
+    ///
+    /// In isolated mode, this checks if the message_tx channel is still open.
+    /// If the channel is closed, the query is considered inactive and should be cleaned up.
+    ///
+    /// # Returns
+    ///
+    /// true if the query is still active (can send messages), false otherwise
+    pub fn is_active(&self) -> bool {
+        !self.message_tx.is_closed()
     }
 
     /// Set the timeout for control requests.
@@ -259,6 +336,8 @@ impl QueryFull {
         let stdin = self.stdin.clone();
         let query_receivers = Arc::clone(&self.query_receivers);
         let current_query_id = Arc::clone(&self.current_query_id);
+        // Read is_isolated value at start time (AtomicBool can be copied by value)
+        let is_isolated_value = self.is_isolated.load(Ordering::Relaxed);
 
         // Create a channel to signal when background task is ready
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -372,78 +451,90 @@ impl QueryFull {
                                 // Route messages to query-specific receivers for isolation.
                                 // This prevents late-arriving ResultMessages from being
                                 // consumed by the wrong prompt.
+                                //
+                                // In isolated mode (Codex-style), each QueryFull handles only
+                                // one query, so we skip the routing logic and send directly
+                                // to the message_tx channel.
 
                                 let mut routed = false;
 
-                                // Try to route to a specific query receiver
-                                let receivers = query_receivers.lock().await;
-                                if !receivers.is_empty() {
-                                    // For ResultMessage, route to current active query
-                                    if msg_type == Some("result") {
-                                        // ResultMessages should go to the current active query
-                                        // to prevent late-arriving messages from being consumed
-                                        // by the wrong prompt
-                                        drop(receivers);
+                                // Check if we're in isolated mode
+                                let isolated = query_receivers
+                                    .try_lock()
+                                    .map_or(false, |guard| guard.is_empty())
+                                    && is_isolated_value;
 
-                                        // Get the current active query_id
-                                        let current_id = current_query_id.lock().await.clone();
+                                if isolated {
+                                    // Isolated mode: send directly to message_tx
+                                    // No routing needed because this QueryFull handles only one query
+                                    tracing::trace!("Isolated mode: sending message directly to channel");
+                                    let _ = message_tx.send(message);
+                                    routed = true;
+                                } else {
+                                    // Non-isolated mode: use query-scoped routing
+                                    // IMPORTANT: To avoid deadlock, we must acquire locks in consistent order
 
-                                        if let Some(active_query_id) = current_id {
-                                            let receivers = query_receivers.lock().await;
-                                            if let Some(tx) = receivers.get(&active_query_id) {
-                                                if tx.send(message.clone()).is_ok() {
-                                                    routed = true;
-                                                    tracing::trace!(
-                                                        query_id = %active_query_id,
-                                                        "Routed ResultMessage to current active query receiver"
-                                                    );
-                                                } else {
-                                                    // Receiver closed, fall back to first available
-                                                    tracing::warn!(
-                                                        query_id = %active_query_id,
-                                                        "Current query receiver closed, trying fallback"
-                                                    );
+                                    // First, get current_query_id while holding NO other locks
+                                    let current_id = current_query_id.lock().await.clone();
+
+                                    // Then, lock query_receivers and route the message
+                                    let receivers = query_receivers.lock().await;
+                                    if !receivers.is_empty() {
+                                        // For ResultMessage, route to current active query
+                                        if msg_type == Some("result") {
+                                            // ResultMessages should go to the current active query
+                                            // to prevent late-arriving messages from being consumed
+                                            // by the wrong prompt
+                                            if let Some(active_query_id) = current_id {
+                                                if let Some(tx) = receivers.get(&active_query_id) {
+                                                    if tx.send(message.clone()).is_ok() {
+                                                        routed = true;
+                                                        tracing::trace!(
+                                                            query_id = %active_query_id,
+                                                            "Routed ResultMessage to current active query receiver"
+                                                        );
+                                                    } else {
+                                                        // Receiver closed, fall back to first available
+                                                        tracing::warn!(
+                                                            query_id = %active_query_id,
+                                                            "Current query receiver closed, trying fallback"
+                                                        );
+                                                    }
                                                 }
                                             }
-                                        }
 
-                                        // Fallback: if current receiver failed, try any available receiver
-                                        if !routed {
-                                            let receivers = query_receivers.lock().await;
-                                            if let Some((_, tx)) = receivers.iter().next() {
-                                                if tx.send(message.clone()).is_ok() {
-                                                    routed = true;
-                                                    tracing::warn!(
-                                                        "Routed ResultMessage to fallback receiver (may indicate race condition)"
-                                                    );
+                                            // Fallback: if current receiver failed, try any available receiver
+                                            if !routed {
+                                                if let Some((_, tx)) = receivers.iter().next() {
+                                                    if tx.send(message.clone()).is_ok() {
+                                                        routed = true;
+                                                        tracing::warn!(
+                                                            "Routed ResultMessage to fallback receiver (may indicate race condition)"
+                                                        );
+                                                    }
                                                 }
                                             }
-                                        }
-                                    } else {
-                                        // For non-Result messages, broadcast to all receivers
-                                        drop(receivers);
-
-                                        let receivers = query_receivers.lock().await;
-                                        let mut send_count = 0;
-                                        for (_, tx) in receivers.iter() {
-                                            if tx.send(message.clone()).is_ok() {
-                                                send_count += 1;
+                                        } else {
+                                            // For non-Result messages, broadcast to all receivers
+                                            let mut send_count = 0;
+                                            for (_, tx) in receivers.iter() {
+                                                if tx.send(message.clone()).is_ok() {
+                                                    send_count += 1;
+                                                }
                                             }
-                                        }
 
-                                        if send_count > 0 {
-                                            routed = true;
-                                            tracing::trace!(send_count, "Broadcast message to query receivers");
+                                            if send_count > 0 {
+                                                routed = true;
+                                                tracing::trace!(send_count, "Broadcast message to query receivers");
+                                            }
                                         }
                                     }
-                                } else {
-                                    drop(receivers);
-                                }
 
-                                // Fallback: if no query receivers or routing failed, send to global channel
-                                if !routed {
-                                    tracing::trace!("No query receivers, using global channel");
-                                    let _ = message_tx.send(message);
+                                    // Fallback: if no query receivers or routing failed, send to global channel
+                                    if !routed {
+                                        tracing::trace!("No query receivers, using global channel");
+                                        let _ = message_tx.send(message);
+                                    }
                                 }
                             }
                         }

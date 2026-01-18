@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use futures::stream::Stream;
 use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::errors::Result;
 
@@ -29,4 +31,11 @@ pub trait Transport: Send + Sync {
 
     /// End input stream (close stdin)
     async fn end_input(&mut self) -> Result<()>;
+
+    /// Get stdin for direct write access (optional, for control protocol)
+    ///
+    /// Returns None if the transport doesn't support direct stdin access
+    fn get_stdin(&self) -> Option<Arc<Mutex<Option<tokio::process::ChildStdin>>>> {
+        None
+    }
 }

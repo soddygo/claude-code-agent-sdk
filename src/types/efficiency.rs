@@ -282,17 +282,18 @@ pub fn build_efficiency_hooks(config: &EfficiencyConfig) -> HashMap<HookEvent, V
     }
 
     // Add PostToolUse hook for metrics collection
-    if config.track_metrics && config.metrics.is_some() {
-        let metrics = config.metrics.as_ref().unwrap();
-        let callback = create_post_tool_use_hook(Arc::clone(metrics));
-        hooks.insert(
-            HookEvent::PostToolUse,
-            vec![HookMatcher {
-                matcher: None,
-                hooks: vec![callback],
-                timeout: None,
-            }],
-        );
+    if config.track_metrics {
+        if let Some(metrics) = &config.metrics {
+            let callback = create_post_tool_use_hook(Arc::clone(metrics));
+            hooks.insert(
+                HookEvent::PostToolUse,
+                vec![HookMatcher {
+                    matcher: None,
+                    hooks: vec![callback],
+                    timeout: None,
+                }],
+            );
+        }
     }
 
     if config.inject_stop_tips {
@@ -323,7 +324,11 @@ pub fn merge_hooks(
         return user_hooks;
     }
 
-    let mut merged = user_hooks.unwrap_or_default();
+    // Use match for explicit handling instead of unwrap_or_default
+    let mut merged = match user_hooks {
+        Some(hooks) => hooks,
+        None => HashMap::new(),
+    };
 
     for (event, matchers) in efficiency_hooks {
         merged.entry(event).or_default().extend(matchers);

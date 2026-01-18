@@ -831,6 +831,10 @@ impl Transport for SubprocessTransport {
         }
         Ok(())
     }
+
+    fn get_stdin(&self) -> Option<Arc<Mutex<Option<tokio::process::ChildStdin>>>> {
+        Some(Arc::clone(&self.stdin))
+    }
 }
 
 impl Drop for SubprocessTransport {

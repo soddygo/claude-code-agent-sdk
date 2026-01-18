@@ -49,6 +49,12 @@ tracing = "0.1"
 uuid = { version = "1.19", features = ["v4"] }
 typed-builder = "0.23.2"
 
+# Concurrent HashMap for better performance
+dashmap = "6.1"
+
+# Time utilities
+chrono = "0.4"
+
 # Macro utilities
 paste = "1.0"
 

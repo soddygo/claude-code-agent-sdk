@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::errors::{ClaudeError, Result};
 use crate::internal::message_parser::MessageParser;
-use crate::internal::query_full::QueryFull;
+use crate::internal::query_manager::QueryManager;
 use crate::internal::transport::subprocess::QueryPrompt;
 use crate::internal::transport::{SubprocessTransport, Transport};
 use crate::types::config::{ClaudeAgentOptions, PermissionMode};
@@ -23,6 +23,10 @@ use crate::types::messages::{Message, UserContentBlock};
 /// This client provides the same functionality as Python's ClaudeSDKClient,
 /// supporting bidirectional communication, streaming responses, and dynamic
 /// control over the Claude session.
+///
+/// This implementation uses the Codex-style architecture with isolated queries,
+/// where each query has its own completely independent QueryFull instance.
+/// This ensures complete message isolation and prevents ResultMessage confusion.
 ///
 /// # Example
 ///
@@ -55,7 +59,10 @@ use crate::types::messages::{Message, UserContentBlock};
 /// ```
 pub struct ClaudeClient {
     options: ClaudeAgentOptions,
-    query: Option<Arc<Mutex<QueryFull>>>,
+    /// QueryManager for creating isolated queries (Codex-style architecture)
+    query_manager: Option<Arc<QueryManager>>,
+    /// Current query_id for the active prompt
+    current_query_id: Option<String>,
     connected: bool,
 }
 
@@ -76,7 +83,8 @@ impl ClaudeClient {
     pub fn new(options: ClaudeAgentOptions) -> Self {
         Self {
             options,
-            query: None,
+            query_manager: None,
+            current_query_id: None,
             connected: false,
         }
     }
@@ -112,7 +120,8 @@ impl ClaudeClient {
 
         Ok(Self {
             options,
-            query: None,
+            query_manager: None,
+            current_query_id: None,
             connected: false,
         })
     }
@@ -121,6 +130,9 @@ impl ClaudeClient {
     ///
     /// This establishes the connection to the Claude Code CLI and initializes
     /// the bidirectional communication channel.
+    ///
+    /// Uses the Codex-style architecture with QueryManager for complete
+    /// message isolation between queries.
     ///
     /// # Errors
     ///
@@ -144,7 +156,7 @@ impl ClaudeClient {
             return Ok(());
         }
 
-        info!("Connecting to Claude Code CLI");
+        info!("Connecting to Claude Code CLI (using QueryManager for isolated queries)");
 
         // Automatically set permission_prompt_tool_name to "stdio" when can_use_tool is provided
         // This matches Python SDK behavior (client.py lines 106-122)
@@ -169,46 +181,7 @@ impl ClaudeClient {
                     ));
         }
 
-        // Create transport in streaming mode (no initial prompt)
-        let prompt = QueryPrompt::Streaming;
-        let mut transport = SubprocessTransport::new(prompt, options)?;
-
-        // Don't send initial prompt - we'll use query() for that
-        transport.connect().await?;
-
-        // Extract stdin for direct access (avoids transport lock deadlock)
-        let stdin = Arc::clone(&transport.stdin);
-
-        // Create Query with hooks
-        let mut query = QueryFull::new(Box::new(transport));
-        query.set_stdin(stdin);
-
-        // Set control request timeout from options
-        query.set_control_request_timeout(self.options.control_request_timeout);
-
-        // Extract SDK MCP servers from options
-        let sdk_mcp_servers =
-            if let crate::types::mcp::McpServers::Dict(servers_dict) = &self.options.mcp_servers {
-                servers_dict
-                    .iter()
-                    .filter_map(|(name, config)| {
-                        if let crate::types::mcp::McpServerConfig::Sdk(sdk_config) = config {
-                            Some((name.clone(), sdk_config.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
-        query.set_sdk_mcp_servers(sdk_mcp_servers).await;
-
-        // Set can_use_tool callback if provided
-        if let Some(ref callback) = self.options.can_use_tool {
-            query.set_can_use_tool(Some(Arc::clone(callback))).await;
-        }
-
+        // Prepare hooks for initialization
         // Build efficiency hooks if configured
         let efficiency_hooks = self
             .options
@@ -238,18 +211,56 @@ impl ClaudeClient {
                 .collect()
         });
 
-        // Start reading messages in background FIRST
-        // This must happen before initialize() because initialize()
-        // sends a control request and waits for response
-        query.start().await?;
+        // Extract SDK MCP servers from options
+        let sdk_mcp_servers =
+            if let crate::types::mcp::McpServers::Dict(servers_dict) = &self.options.mcp_servers {
+                servers_dict
+                    .iter()
+                    .filter_map(|(name, config)| {
+                        if let crate::types::mcp::McpServerConfig::Sdk(sdk_config) = config {
+                            Some((name.clone(), sdk_config.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
 
-        // Initialize with hooks (sends control request)
-        query.initialize(hooks).await?;
+        // Clone options for the transport factory
+        let options_clone = options.clone();
 
-        self.query = Some(Arc::new(Mutex::new(query)));
+        // Create QueryManager with a transport factory
+        // The factory creates new transports for each isolated query
+        // Note: connect() is called later in create_query(), not here
+        let mut query_manager = QueryManager::new(move || {
+            let prompt = QueryPrompt::Streaming;
+            let transport = SubprocessTransport::new(prompt, options_clone.clone())?;
+            Ok(Box::new(transport) as Box<dyn Transport>)
+        });
+
+        // Set control request timeout
+        query_manager.set_control_request_timeout(self.options.control_request_timeout);
+
+        // Set configuration on QueryManager
+        query_manager.set_hooks(hooks).await;
+        query_manager.set_sdk_mcp_servers(sdk_mcp_servers).await;
+        query_manager.set_can_use_tool(self.options.can_use_tool.clone()).await;
+
+        let query_manager = Arc::new(query_manager);
+
+        // Create the first query for initialization
+        let first_query_id = query_manager.create_query().await?;
+
+        // Start cleanup task for inactive queries
+        Arc::clone(&query_manager).start_cleanup_task();
+
+        self.query_manager = Some(query_manager);
+        self.current_query_id = Some(first_query_id);
         self.connected = true;
 
-        info!("Successfully connected to Claude Code CLI");
+        info!("Successfully connected to Claude Code CLI with QueryManager");
         Ok(())
     }
 
@@ -320,12 +331,20 @@ impl ClaudeClient {
         prompt: impl Into<String>,
         session_id: impl Into<String>,
     ) -> Result<()> {
-        let query = self.query.as_ref().ok_or_else(|| {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
             ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
         })?;
 
         let prompt_str = prompt.into();
         let session_id_str = session_id.into();
+
+        // Create a new isolated query for each prompt (Codex-style architecture)
+        // This ensures complete message isolation between prompts
+        let query_id = query_manager.create_query().await?;
+        self.current_query_id = Some(query_id.clone());
+
+        // Get the isolated query
+        let query = query_manager.get_query(&query_id)?;
 
         // Format as JSON message for stream-json input format
         let user_message = serde_json::json!({
@@ -342,9 +361,7 @@ impl ClaudeClient {
         })?;
 
         // Write directly to stdin (bypasses transport lock)
-        let query_guard = query.lock().await;
-        let stdin = query_guard.stdin.clone();
-        drop(query_guard);
+        let stdin = query.stdin.clone();
 
         if let Some(stdin_arc) = stdin {
             let mut stdin_guard = stdin_arc.lock().await;
@@ -366,6 +383,12 @@ impl ClaudeClient {
         } else {
             return Err(ClaudeError::Transport("stdin not set".to_string()));
         }
+
+        debug!(
+            query_id = %query_id,
+            session_id = %session_id_str,
+            "Sent query to isolated query"
+        );
 
         Ok(())
     }
@@ -450,7 +473,7 @@ impl ClaudeClient {
         content: impl Into<Vec<UserContentBlock>>,
         session_id: impl Into<String>,
     ) -> Result<()> {
-        let query = self.query.as_ref().ok_or_else(|| {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
             ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
         })?;
 
@@ -458,6 +481,14 @@ impl ClaudeClient {
         UserContentBlock::validate_content(&content_blocks)?;
 
         let session_id_str = session_id.into();
+
+        // Create a new isolated query for each prompt (Codex-style architecture)
+        // This ensures complete message isolation between prompts
+        let query_id = query_manager.create_query().await?;
+        self.current_query_id = Some(query_id.clone());
+
+        // Get the isolated query
+        let query = query_manager.get_query(&query_id)?;
 
         // Format as JSON message for stream-json input format
         // Content is an array of content blocks, not a simple string
@@ -475,9 +506,7 @@ impl ClaudeClient {
         })?;
 
         // Write directly to stdin (bypasses transport lock)
-        let query_guard = query.lock().await;
-        let stdin = query_guard.stdin.clone();
-        drop(query_guard);
+        let stdin = query.stdin.clone();
 
         if let Some(stdin_arc) = stdin {
             let mut stdin_guard = stdin_arc.lock().await;
@@ -499,6 +528,12 @@ impl ClaudeClient {
         } else {
             return Err(ClaudeError::Transport("stdin not set".to_string()));
         }
+
+        debug!(
+            query_id = %query_id,
+            session_id = %session_id_str,
+            "Sent content query to isolated query"
+        );
 
         Ok(())
     }
@@ -533,8 +568,8 @@ impl ClaudeClient {
     /// # }
     /// ```
     pub fn receive_messages(&self) -> Pin<Box<dyn Stream<Item = Result<Message>> + Send + '_>> {
-        let query = match &self.query {
-            Some(q) => Arc::clone(q),
+        let query_manager = match &self.query_manager {
+            Some(qm) => Arc::clone(qm),
             None => {
                 return Box::pin(futures::stream::once(async {
                     Err(ClaudeError::InvalidConfig(
@@ -544,10 +579,29 @@ impl ClaudeClient {
             }
         };
 
+        let query_id = match &self.current_query_id {
+            Some(id) => id.clone(),
+            None => {
+                return Box::pin(futures::stream::once(async {
+                    Err(ClaudeError::InvalidConfig(
+                        "No active query. Call query() first.".to_string(),
+                    ))
+                }));
+            }
+        };
+
         Box::pin(async_stream::stream! {
+            // Get the isolated query and its message receiver
+            let query = match query_manager.get_query(&query_id) {
+                Ok(q) => q,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+
             let rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>> = {
-                let query_guard = query.lock().await;
-                Arc::clone(&query_guard.message_rx)
+                Arc::clone(&query.message_rx)
             };
 
             loop {
@@ -612,8 +666,8 @@ impl ClaudeClient {
     /// # }
     /// ```
     pub fn receive_response(&self) -> Pin<Box<dyn Stream<Item = Result<Message>> + Send + '_>> {
-        let query = match &self.query {
-            Some(q) => Arc::clone(q),
+        let query_manager = match &self.query_manager {
+            Some(qm) => Arc::clone(qm),
             None => {
                 return Box::pin(futures::stream::once(async {
                     Err(ClaudeError::InvalidConfig(
@@ -623,35 +677,58 @@ impl ClaudeClient {
             }
         };
 
+        let query_id = match &self.current_query_id {
+            Some(id) => id.clone(),
+            None => {
+                return Box::pin(futures::stream::once(async {
+                    Err(ClaudeError::InvalidConfig(
+                        "No active query. Call query() first.".to_string(),
+                    ))
+                }));
+            }
+        };
+
         Box::pin(async_stream::stream! {
             // ====================================================================
-            // QUERY-SCOPED MESSAGE CHANNEL
+            // ISOLATED QUERY MESSAGE CHANNEL (Codex-style)
             // ====================================================================
-            // Create an isolated message channel for this specific query.
-            // This ensures we only receive messages intended for this prompt,
-            // preventing late-arriving ResultMessages from being consumed
-            // by the wrong query.
+            // In the Codex-style architecture, each query has its own completely
+            // isolated QueryFull instance. We get the message receiver directly
+            // from the isolated query, eliminating the need for routing logic.
             //
-            // Note: Cleanup is handled by the periodic cleanup task in QueryFull,
-            // which removes stale receivers whose senders have been closed.
-
-            let query_id = {
-                let query_guard = query.lock().await;
-                query_guard.generate_query_id()
-            };
+            // This provides:
+            // - Complete message isolation
+            // - No possibility of message confusion
+            // - Simpler architecture without routing overhead
+            //
+            // Note: Cleanup is handled by the periodic cleanup task in QueryManager,
+            // which removes inactive queries whose channels have been closed.
 
             debug!(
                 query_id = %query_id,
-                "Creating query-scoped receiver"
+                "Getting message receiver from isolated query"
             );
 
-            let mut rx = {
-                let query_guard = query.lock().await;
-                query_guard.register_query_receiver(query_id.clone()).await
+            // Get the isolated query and its message receiver
+            let query = match query_manager.get_query(&query_id) {
+                Ok(q) => q,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+
+            // Get the message receiver from the isolated query
+            // In isolated mode, we directly access the message_rx without routing
+            let rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>> = {
+                Arc::clone(&query.message_rx)
             };
 
             loop {
-                let message = rx.recv().await;
+                let message = {
+                    let mut rx_guard = rx.lock().await;
+                    rx_guard.recv().await
+                };
 
                 match message {
                     Some(json) => {
@@ -665,6 +742,7 @@ impl ClaudeClient {
                                         "Received ResultMessage, ending stream"
                                     );
                                     // Cleanup will be handled by the periodic cleanup task
+                                    // when the query becomes inactive
                                     break;
                                 }
                             }
@@ -677,7 +755,7 @@ impl ClaudeClient {
                     None => {
                         debug!(
                             query_id = %query_id,
-                            "Query-scoped channel closed"
+                            "Isolated query channel closed"
                         );
                         // Cleanup will be handled by the periodic cleanup task
                         break;
@@ -718,13 +796,20 @@ impl ClaudeClient {
     /// # }
     /// ```
     pub async fn drain_messages(&self) -> usize {
-        let Some(query) = &self.query else {
+        let Some(query_manager) = &self.query_manager else {
+            return 0;
+        };
+
+        let Some(query_id) = &self.current_query_id else {
+            return 0;
+        };
+
+        let Ok(query) = query_manager.get_query(query_id) else {
             return 0;
         };
 
         let rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>> = {
-            let query_guard = query.lock().await;
-            Arc::clone(&query_guard.message_rx)
+            Arc::clone(&query.message_rx)
         };
 
         let mut count = 0;
@@ -753,12 +838,16 @@ impl ClaudeClient {
     ///
     /// Returns an error if the client is not connected or if sending fails.
     pub async fn interrupt(&self) -> Result<()> {
-        let query = self.query.as_ref().ok_or_else(|| {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
             ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
         })?;
 
-        let query_guard = query.lock().await;
-        query_guard.interrupt().await
+        let query_id = self.current_query_id.as_ref().ok_or_else(|| {
+            ClaudeError::InvalidConfig("No active query. Call query() first.".to_string())
+        })?;
+
+        let query = query_manager.get_query(query_id)?;
+        query.interrupt().await
     }
 
     /// Change the permission mode dynamically
@@ -773,12 +862,16 @@ impl ClaudeClient {
     ///
     /// Returns an error if the client is not connected or if sending fails.
     pub async fn set_permission_mode(&self, mode: PermissionMode) -> Result<()> {
-        let query = self.query.as_ref().ok_or_else(|| {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
             ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
         })?;
 
-        let query_guard = query.lock().await;
-        query_guard.set_permission_mode(mode).await
+        let query_id = self.current_query_id.as_ref().ok_or_else(|| {
+            ClaudeError::InvalidConfig("No active query. Call query() first.".to_string())
+        })?;
+
+        let query = query_manager.get_query(query_id)?;
+        query.set_permission_mode(mode).await
     }
 
     /// Change the AI model dynamically
@@ -793,12 +886,16 @@ impl ClaudeClient {
     ///
     /// Returns an error if the client is not connected or if sending fails.
     pub async fn set_model(&self, model: Option<&str>) -> Result<()> {
-        let query = self.query.as_ref().ok_or_else(|| {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
             ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
         })?;
 
-        let query_guard = query.lock().await;
-        query_guard.set_model(model).await
+        let query_id = self.current_query_id.as_ref().ok_or_else(|| {
+            ClaudeError::InvalidConfig("No active query. Call query() first.".to_string())
+        })?;
+
+        let query = query_manager.get_query(query_id)?;
+        query.set_model(model).await
     }
 
     /// Rewind tracked files to their state at a specific user message.
@@ -856,12 +953,16 @@ impl ClaudeClient {
     /// # }
     /// ```
     pub async fn rewind_files(&self, user_message_id: &str) -> Result<()> {
-        let query = self.query.as_ref().ok_or_else(|| {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
             ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
         })?;
 
-        let query_guard = query.lock().await;
-        query_guard.rewind_files(user_message_id).await
+        let query_id = self.current_query_id.as_ref().ok_or_else(|| {
+            ClaudeError::InvalidConfig("No active query. Call query() first.".to_string())
+        })?;
+
+        let query = query_manager.get_query(query_id)?;
+        query.rewind_files(user_message_id).await
     }
 
     /// Get server initialization info including available commands and output styles
@@ -893,9 +994,12 @@ impl ClaudeClient {
     /// # }
     /// ```
     pub async fn get_server_info(&self) -> Option<serde_json::Value> {
-        let query = self.query.as_ref()?;
-        let query_guard = query.lock().await;
-        query_guard.get_initialization_result().await
+        let query_manager = self.query_manager.as_ref()?;
+        let query_id = self.current_query_id.as_ref()?;
+        let Ok(query) = query_manager.get_query(query_id) else {
+            return None;
+        };
+        query.get_initialization_result().await
     }
 
     /// Start a new session by switching to a different session ID
@@ -953,28 +1057,34 @@ impl ClaudeClient {
             return Ok(());
         }
 
-        info!("Disconnecting from Claude Code CLI");
+        info!("Disconnecting from Claude Code CLI (closing all isolated queries)");
 
-        if let Some(query) = self.query.take() {
-            // Close stdin first (using direct access) to signal CLI to exit
-            // This will cause the background task to finish and release transport lock
-            let query_guard = query.lock().await;
-            if let Some(ref stdin_arc) = query_guard.stdin {
-                let mut stdin_guard = stdin_arc.lock().await;
-                if let Some(mut stdin_stream) = stdin_guard.take() {
-                    let _ = stdin_stream.shutdown().await;
+        if let Some(query_manager) = self.query_manager.take() {
+            // Get all queries for cleanup
+            let queries = query_manager.get_all_queries();
+
+            // Close all isolated queries by closing their resources
+            // This signals each CLI process to exit
+            for (_query_id, query) in &queries {
+                // Close stdin (if available)
+                if let Some(ref stdin_arc) = query.stdin {
+                    let mut stdin_guard = stdin_arc.lock().await;
+                    if let Some(mut stdin_stream) = stdin_guard.take() {
+                        let _ = stdin_stream.shutdown().await;
+                    }
                 }
+
+                // Close transport
+                let transport = Arc::clone(&query.transport);
+                let mut transport_guard = transport.lock().await;
+                let _ = transport_guard.close().await;
             }
-            let transport = Arc::clone(&query_guard.transport);
-            drop(query_guard);
 
-            // Give background task a moment to finish reading and release lock
+            // Give background tasks a moment to finish reading and release locks
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            let mut transport_guard = transport.lock().await;
-            transport_guard.close().await?;
         }
 
+        self.current_query_id = None;
         self.connected = false;
         debug!("Disconnected successfully");
         Ok(())
