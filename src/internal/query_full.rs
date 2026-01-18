@@ -430,9 +430,16 @@ impl QueryFull {
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
 
+                // Parse tool_use_id if present
+                let tool_use_id = request_data
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
                 let context = ToolPermissionContext {
                     signal: None,
                     suggestions,
+                    tool_use_id,
                 };
 
                 // Get the callback
