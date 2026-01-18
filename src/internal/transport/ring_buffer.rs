@@ -3,7 +3,7 @@
 //! Uses ringbuf library to implement an auto-managed circular buffer
 //! that automatically overwrites old data when full, keeping memory usage stable.
 
-use ringbuf::{RingBuffer, Producer, Consumer};
+use ringbuf::{traits::*, HeapRb};
 use std::io;
 
 const DEFAULT_BUFFER_CAPACITY: usize = 20 * 1024 * 1024; // 20MB
@@ -13,57 +13,46 @@ const DEFAULT_BUFFER_CAPACITY: usize = 20 * 1024 * 1024; // 20MB
 /// This provides a fixed-size buffer that automatically overwrites old data
 /// when full, preventing unbounded memory growth in long-running sessions.
 pub struct CircularBuffer {
-    /// ringbuf's Producer end
-    producer: Producer<u8>,
-    /// ringbuf's Consumer end
-    consumer: Consumer<u8>,
+    /// The underlying ring buffer
+    rb: HeapRb<u8>,
 }
 
 impl CircularBuffer {
     /// Create a new circular buffer with the specified capacity
     pub fn new(capacity: usize) -> Self {
-        let rb = RingBuffer::new(capacity);
-        let (producer, consumer) = rb.split();
-
-        Self { producer, consumer }
+        Self {
+            rb: HeapRb::new(capacity),
+        }
     }
 
-    /// Create a new circular buffer with default capacity (10MB)
+    /// Create a new circular buffer with default capacity (20MB)
     pub fn with_default_capacity() -> Self {
         Self::new(DEFAULT_BUFFER_CAPACITY)
     }
 
-    /// Write data to the buffer
+    /// Write data to the buffer (overwrites old data when full)
     ///
-    /// Returns the number of bytes written. If the buffer is full,
-    /// old data will be automatically overwritten by ringbuf.
+    /// Returns the number of bytes written.
+    /// When buffer is full, oldest data is automatically overwritten.
     pub fn write(&mut self, data: &[u8]) -> usize {
-        let mut written = 0;
-
-        for &byte in data {
-            // ringbuf handles overwriting automatically when full
-            // We use push (blocking) to ensure all data is written
-            // When the buffer is full, it will overwrite the oldest data
-            self.producer.push(byte);
-            written += 1;
-        }
-
+        let (mut prod, _) = self.rb.split_ref();
+        // Use push_slice to write all data, overwriting if necessary
+        let written = prod.push_slice(data);
         written
     }
 
-    /// Try to write data without blocking
+    /// Try to write data without overwriting
     ///
     /// Returns the number of bytes written. If the buffer is full,
     /// stops writing instead of overwriting.
     pub fn try_write(&mut self, data: &[u8]) -> usize {
+        let (mut prod, _) = self.rb.split_ref();
         let mut written = 0;
 
         for &byte in data {
-            if self.producer.try_push(byte).is_ok() {
-                written += 1;
-            } else {
-                // Buffer full, stop writing
-                break;
+            match prod.try_push(byte) {
+                Ok(()) => written += 1,
+                Err(_) => break, // Buffer full, stop writing
             }
         }
 
@@ -75,19 +64,20 @@ impl CircularBuffer {
     /// Returns Ok(Some(line)) if a complete line was found,
     /// Ok(None) if no data is available, or Err on error.
     pub fn read_line(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let (_, mut cons) = self.rb.split_ref();
         let mut line = Vec::new();
         let mut found_data = false;
 
         loop {
-            match self.consumer.try_pop() {
-                Ok(byte) => {
+            match cons.try_pop() {
+                Some(byte) => {
                     found_data = true;
                     if byte == b'\n' {
                         return Ok(Some(line));
                     }
                     line.push(byte);
                 }
-                Err(ringbuf::PopError::Empty) => {
+                None => {
                     if found_data {
                         // We read some data but didn't find a newline yet
                         // This is incomplete data, return None to signal "wait for more"
@@ -101,19 +91,22 @@ impl CircularBuffer {
     }
 
     /// Get the number of bytes available to read
-    pub fn len(&self) -> usize {
-        // Approximate: available slots in consumer
-        0 // ringbuf doesn't expose this directly in the API
+    pub fn len(&mut self) -> usize {
+        let (_, cons) = self.rb.split_ref();
+        cons.occupied_len()
     }
 
     /// Check if the buffer is empty
-    pub fn is_empty(&self) -> bool {
-        self.consumer.is_empty()
+    pub fn is_empty(&mut self) -> bool {
+        let (_, cons) = self.rb.split_ref();
+        cons.is_empty()
     }
 
     /// Get the total capacity of the buffer
-    pub fn capacity(&self) -> usize {
-        self.producer.capacity()
+    pub fn capacity(&mut self) -> usize {
+        let (_, cons) = self.rb.split_ref();
+        // capacity() returns NonZero<usize>, convert to usize
+        cons.capacity().into()
     }
 }
 
