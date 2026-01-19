@@ -338,9 +338,8 @@ impl ClaudeClient {
         let prompt_str = prompt.into();
         let session_id_str = session_id.into();
 
-        // Create a new isolated query for each prompt (Codex-style architecture)
-        // This ensures complete message isolation between prompts
-        let query_id = query_manager.create_query().await?;
+        // Get or create query for this session (reuses existing query to maintain context)
+        let query_id = query_manager.get_or_create_session_query(&session_id_str).await?;
         self.current_query_id = Some(query_id.clone());
 
         // Get the isolated query

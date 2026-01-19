@@ -35,10 +35,19 @@ use uuid::Uuid;
 ///
 /// Each query gets its own completely isolated QueryFull with independent channels.
 /// This is the Codex-style architecture for complete message isolation.
+///
+/// Session Context:
+/// - Queries are organized by session_id to maintain conversation context
+/// - Each session has its own QueryFull instance that persists across prompts
+/// - This ensures that within a session, Claude remembers previous messages
 pub struct QueryManager {
     /// Map of query_id -> QueryFull instance
     /// Using DashMap for lock-free concurrent access
     queries: DashMap<String, Arc<QueryFull>>,
+
+    /// Map of session_id -> query_id for context persistence
+    /// Each session gets its own QueryFull that is reused across prompts
+    session_queries: DashMap<String, String>,
 
     /// Shared transport factory (for creating new CLI connections)
     transport_factory: Arc<
@@ -95,6 +104,7 @@ impl QueryManager {
     {
         Self {
             queries: DashMap::new(),
+            session_queries: DashMap::new(),
             transport_factory: Arc::new(Mutex::new(transport_factory)),
             hooks: Arc::new(Mutex::new(None)),
             sdk_mcp_servers: Arc::new(Mutex::new(HashMap::new())),
@@ -214,6 +224,71 @@ impl QueryManager {
             .ok_or_else(|| {
                 ClaudeError::InvalidConfig(format!("Query not found: {}", query_id))
             })
+    }
+
+    /// Get or create a query for a specific session
+    ///
+    /// This method ensures that within a session, the same QueryFull instance is reused,
+    /// maintaining conversation context across multiple prompts.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - The session identifier
+    ///
+    /// # Returns
+    ///
+    /// The query_id for the session's query
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if query creation or initialization fails
+    pub async fn get_or_create_session_query(&self, session_id: &str) -> Result<String> {
+        // Check if session already has a query
+        if let Some(entry) = self.session_queries.get(session_id) {
+            let query_id = entry.value().clone();
+            // Verify the query is still active
+            if let Some(query) = self.queries.get(&query_id) {
+                if query.is_active() {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        query_id = %query_id,
+                        "Reusing existing query for session"
+                    );
+                    return Ok(query_id);
+                } else {
+                    // Query is inactive, remove it
+                    tracing::warn!(
+                        session_id = %session_id,
+                        query_id = %query_id,
+                        "Existing query for session is inactive, removing"
+                    );
+                    self.session_queries.remove(session_id);
+                    self.queries.remove(&query_id);
+                }
+            } else {
+                // Query not found in queries map, remove stale session mapping
+                tracing::warn!(
+                    session_id = %session_id,
+                    query_id = %query_id,
+                    "Query not found for session, removing stale mapping"
+                );
+                self.session_queries.remove(session_id);
+            }
+        }
+
+        // Create new query for this session
+        let query_id = self.create_query().await?;
+
+        // Map session to this query
+        self.session_queries.insert(session_id.to_string(), query_id.clone());
+
+        tracing::info!(
+            session_id = %session_id,
+            query_id = %query_id,
+            "Created new query for session"
+        );
+
+        Ok(query_id)
     }
 
     /// Remove a query (cleanup)
