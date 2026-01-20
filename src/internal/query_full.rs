@@ -226,11 +226,28 @@ impl QueryFull {
         // Use try_recv to avoid waiting
         while let Ok(_) = rx.try_recv() {
             count += 1;
-            // Limit the number of messages we drain to prevent infinite loops
-            if count > 1000 {
+
+            // Log warning at intervals to track draining progress
+            if count == 100 {
                 tracing::warn!(
                     count,
-                    "Drained over 1000 messages, stopping to prevent infinite loop"
+                    "Drained 100 pending messages, continuing..."
+                );
+            } else if count == 1000 {
+                tracing::warn!(
+                    count,
+                    "Drained 1000 pending messages, continuing to drain..."
+                );
+            } else if count == 10000 {
+                tracing::error!(
+                    count,
+                    "Drained 10000 pending messages! This may indicate a serious issue. Continuing to drain to prevent message buildup."
+                );
+            } else if count > 100000 {
+                // Safety limit to prevent true infinite loops
+                tracing::error!(
+                    count,
+                    "Drained over 100000 pending messages! Aborting to prevent potential infinite loop."
                 );
                 break;
             }
@@ -240,6 +257,21 @@ impl QueryFull {
             tracing::debug!(
                 count,
                 "Drained pending messages from message channel"
+            );
+        }
+
+        // Also clean up any stale pending responses
+        // This prevents memory leaks from cancelled control requests
+        let mut pending = self.pending_responses.lock().await;
+        let before_len = pending.len();
+        // Remove any responses where the sender has been dropped
+        pending.retain(|_, sender)| sender.is_closed());
+        let after_len = pending.len();
+        if before_len != after_len {
+            tracing::debug!(
+                before_len,
+                after_len,
+                "Cleaned up stale pending responses"
             );
         }
 
