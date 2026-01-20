@@ -210,6 +210,42 @@ impl QueryFull {
         *self.sdk_mcp_servers.lock().await = servers;
     }
 
+    /// Drain any pending messages from the message channel
+    ///
+    /// This is called before sending a new prompt to ensure we don't
+    /// receive stale messages from a previous (cancelled) prompt.
+    ///
+    /// # Returns
+    ///
+    /// The number of messages drained
+    pub async fn drain_pending_messages(&self) -> usize {
+        let mut rx = self.message_rx.lock().await;
+        let mut count = 0;
+
+        // Try to receive messages without blocking
+        // Use try_recv to avoid waiting
+        while let Ok(_) = rx.try_recv() {
+            count += 1;
+            // Limit the number of messages we drain to prevent infinite loops
+            if count > 1000 {
+                tracing::warn!(
+                    count,
+                    "Drained over 1000 messages, stopping to prevent infinite loop"
+                );
+                break;
+            }
+        }
+
+        if count > 0 {
+            tracing::debug!(
+                count,
+                "Drained pending messages from message channel"
+            );
+        }
+
+        count
+    }
+
     // ========================================================================
     // Query-Scoped Message Channel Methods
     // ========================================================================

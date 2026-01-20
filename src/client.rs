@@ -345,6 +345,10 @@ impl ClaudeClient {
         // Get the isolated query
         let query = query_manager.get_query(&query_id)?;
 
+        // Drain any pending messages from previous (cancelled) prompts
+        // This prevents receiving stale messages when reusing a query
+        query.drain_pending_messages().await;
+
         // Format as JSON message for stream-json input format
         let user_message = serde_json::json!({
             "type": "user",
@@ -481,13 +485,16 @@ impl ClaudeClient {
 
         let session_id_str = session_id.into();
 
-        // Create a new isolated query for each prompt (Codex-style architecture)
-        // This ensures complete message isolation between prompts
-        let query_id = query_manager.create_query().await?;
+        // Get or create query for this session (reuses existing query to maintain context)
+        let query_id = query_manager.get_or_create_session_query(&session_id_str).await?;
         self.current_query_id = Some(query_id.clone());
 
         // Get the isolated query
         let query = query_manager.get_query(&query_id)?;
+
+        // Drain any pending messages from previous (cancelled) prompts
+        // This prevents receiving stale messages when reusing a query
+        query.drain_pending_messages().await;
 
         // Format as JSON message for stream-json input format
         // Content is an array of content blocks, not a simple string
