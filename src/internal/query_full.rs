@@ -265,7 +265,7 @@ impl QueryFull {
         let mut pending = self.pending_responses.lock().await;
         let before_len = pending.len();
         // Remove any responses where the sender has been dropped
-        pending.retain(|_, sender)| sender.is_closed());
+        pending.retain(|_, sender| !sender.is_closed());
         let after_len = pending.len();
         if before_len != after_len {
             tracing::debug!(
