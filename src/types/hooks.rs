@@ -964,7 +964,7 @@ macro_rules! generate_hook_methods {
 ///
 /// # Example
 /// ```no_run
-/// use claude_agent_sdk_rs::{Hooks, HookInput, HookContext, HookJsonOutput};
+/// use claude_code_agent_sdk::{Hooks, HookInput, HookContext, HookJsonOutput};
 ///
 /// async fn my_hook(input: HookInput, tool_use_id: Option<String>, context: HookContext) -> HookJsonOutput {
 ///     HookJsonOutput::Sync(Default::default())

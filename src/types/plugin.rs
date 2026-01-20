@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// # Examples
 ///
 /// ```
-/// use claude_agent_sdk_rs::SdkPluginConfig;
+/// use claude_code_agent_sdk::SdkPluginConfig;
 /// use std::path::PathBuf;
 ///
 /// // Load a local plugin
@@ -35,7 +35,7 @@ pub enum SdkPluginConfig {
     /// # Example
     ///
     /// ```
-    /// use claude_agent_sdk_rs::SdkPluginConfig;
+    /// use claude_code_agent_sdk::SdkPluginConfig;
     /// use std::path::PathBuf;
     ///
     /// let plugin = SdkPluginConfig::Local {
@@ -54,7 +54,7 @@ impl SdkPluginConfig {
     /// # Examples
     ///
     /// ```
-    /// use claude_agent_sdk_rs::SdkPluginConfig;
+    /// use claude_code_agent_sdk::SdkPluginConfig;
     ///
     /// let plugin = SdkPluginConfig::local("./my-plugin");
     /// ```
@@ -69,7 +69,7 @@ impl SdkPluginConfig {
     /// # Examples
     ///
     /// ```
-    /// use claude_agent_sdk_rs::SdkPluginConfig;
+    /// use claude_code_agent_sdk::SdkPluginConfig;
     ///
     /// let plugin = SdkPluginConfig::local("./my-plugin");
     /// assert!(plugin.path().is_some());

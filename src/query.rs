@@ -55,7 +55,7 @@ fn validate_oneshot_options(options: &ClaudeAgentOptions) -> Result<()> {
 /// # Examples
 ///
 /// ```no_run
-/// use claude_agent_sdk_rs::{query, Message, ContentBlock};
+/// use claude_code_agent_sdk::{query, Message, ContentBlock};
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
@@ -127,7 +127,7 @@ pub async fn query(
 /// # Examples
 ///
 /// ```no_run
-/// use claude_agent_sdk_rs::{query_stream, Message, ContentBlock};
+/// use claude_code_agent_sdk::{query_stream, Message, ContentBlock};
 /// use futures::stream::StreamExt;
 ///
 /// #[tokio::main]
@@ -212,7 +212,7 @@ pub async fn query_stream(
 /// # Examples
 ///
 /// ```no_run
-/// use claude_agent_sdk_rs::{query_with_content, Message, ContentBlock, UserContentBlock};
+/// use claude_code_agent_sdk::{query_with_content, Message, ContentBlock, UserContentBlock};
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
@@ -292,7 +292,7 @@ pub async fn query_with_content(
 /// # Examples
 ///
 /// ```no_run
-/// use claude_agent_sdk_rs::{query_stream_with_content, Message, ContentBlock, UserContentBlock};
+/// use claude_code_agent_sdk::{query_stream_with_content, Message, ContentBlock, UserContentBlock};
 /// use futures::stream::StreamExt;
 ///
 /// #[tokio::main]

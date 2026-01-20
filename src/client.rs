@@ -31,7 +31,7 @@ use crate::types::messages::{Message, UserContentBlock};
 /// # Example
 ///
 /// ```no_run
-/// use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+/// use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
 /// use futures::StreamExt;
 ///
 /// #[tokio::main]
@@ -76,7 +76,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     ///
     /// let client = ClaudeClient::new(ClaudeAgentOptions::default());
     /// ```
@@ -108,10 +108,10 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     ///
     /// let client = ClaudeClient::try_new(ClaudeAgentOptions::default())?;
-    /// # Ok::<(), claude_agent_sdk_rs::ClaudeError>(())
+    /// # Ok::<(), claude_code_agent_sdk::ClaudeError>(())
     /// ```
     pub fn try_new(options: ClaudeAgentOptions) -> Result<Self> {
         // Validate by attempting to create transport (but don't keep it)
@@ -280,7 +280,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
@@ -315,7 +315,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
@@ -344,10 +344,6 @@ impl ClaudeClient {
 
         // Get the isolated query
         let query = query_manager.get_query(&query_id)?;
-
-        // Drain any pending messages from previous (cancelled) prompts
-        // This prevents receiving stale messages when reusing a query
-        query.drain_pending_messages().await;
 
         // Format as JSON message for stream-json input format
         let user_message = serde_json::json!({
@@ -415,7 +411,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions, UserContentBlock};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions, UserContentBlock};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
@@ -456,7 +452,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions, UserContentBlock};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions, UserContentBlock};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
@@ -491,10 +487,6 @@ impl ClaudeClient {
 
         // Get the isolated query
         let query = query_manager.get_query(&query_id)?;
-
-        // Drain any pending messages from previous (cancelled) prompts
-        // This prevents receiving stale messages when reusing a query
-        query.drain_pending_messages().await;
 
         // Format as JSON message for stream-json input format
         // Content is an array of content blocks, not a simple string
@@ -559,7 +551,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     /// # use futures::StreamExt;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -650,7 +642,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions, Message};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions, Message};
     /// # use futures::StreamExt;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -771,71 +763,6 @@ impl ClaudeClient {
         })
     }
 
-    /// Drain any leftover messages from the previous prompt
-    ///
-    /// This method removes any messages remaining in the channel from a previous
-    /// prompt. This should be called before starting a new prompt to ensure
-    /// that the new prompt doesn't receive stale messages.
-    ///
-    /// This is important when prompts are cancelled or end unexpectedly,
-    /// as there may be buffered messages that would otherwise be received
-    /// by the next prompt.
-    ///
-    /// # Returns
-    ///
-    /// The number of messages drained from the channel.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
-    /// # client.connect().await?;
-    /// // Before starting a new prompt, drain any leftover messages
-    /// let drained = client.drain_messages().await;
-    /// if drained > 0 {
-    ///     eprintln!("Drained {} leftover messages from previous prompt", drained);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn drain_messages(&self) -> usize {
-        let Some(query_manager) = &self.query_manager else {
-            return 0;
-        };
-
-        let Some(query_id) = &self.current_query_id else {
-            return 0;
-        };
-
-        let Ok(query) = query_manager.get_query(query_id) else {
-            return 0;
-        };
-
-        let rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>>> = {
-            Arc::clone(&query.message_rx)
-        };
-
-        let mut count = 0;
-        // Use try_recv to drain all currently available messages without blocking
-        loop {
-            let mut rx_guard = rx.lock().await;
-            match rx_guard.try_recv() {
-                Ok(_) => count += 1,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-
-        if count > 0 {
-            debug!(count, "Drained leftover messages from previous prompt");
-        }
-
-        count
-    }
-
     /// Send an interrupt signal to stop the current Claude operation
     ///
     /// This is analogous to Python's `client.interrupt()`.
@@ -926,7 +853,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions, Message};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions, Message};
     /// # use std::collections::HashMap;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -987,7 +914,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
@@ -1028,7 +955,7 @@ impl ClaudeClient {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions};
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());

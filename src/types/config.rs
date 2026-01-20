@@ -448,7 +448,7 @@ impl ClaudeAgentOptions {
     /// # Example
     ///
     /// ```
-    /// use claude_agent_sdk_rs::ClaudeAgentOptions;
+    /// use claude_code_agent_sdk::ClaudeAgentOptions;
     ///
     /// let mut options = ClaudeAgentOptions::builder().build();
     /// options.use_acp_tools(&["Bash", "Read", "Write", "Edit"]);

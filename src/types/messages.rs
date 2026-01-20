@@ -354,9 +354,9 @@ impl UserContentBlock {
     /// # Example
     ///
     /// ```no_run
-    /// # use claude_agent_sdk_rs::UserContentBlock;
+    /// # use claude_code_agent_sdk::UserContentBlock;
     /// let block = UserContentBlock::image_base64("image/png", "iVBORw0KGgo=")?;
-    /// # Ok::<(), claude_agent_sdk_rs::ClaudeError>(())
+    /// # Ok::<(), claude_code_agent_sdk::ClaudeError>(())
     /// ```
     pub fn image_base64(
         media_type: impl Into<String>,

@@ -168,7 +168,7 @@ impl QueryManager {
         let stdin = transport.get_stdin();
 
         // Create isolated QueryFull instance
-        let mut query = QueryFull::new_isolated(transport)?;
+        let mut query = QueryFull::new(transport);
 
         // Set stdin if available
         if let Some(stdin_ref) = stdin {

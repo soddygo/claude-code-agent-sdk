@@ -23,7 +23,7 @@
 //! ### Simple Query
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{query, Message, ContentBlock};
+//! use claude_code_agent_sdk::{query, Message, ContentBlock};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -47,7 +47,7 @@
 //! ### Streaming Query
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{query_stream, Message, ContentBlock};
+//! use claude_code_agent_sdk::{query_stream, Message, ContentBlock};
 //! use futures::StreamExt;
 //!
 //! #[tokio::main]
@@ -73,7 +73,7 @@
 //! ### Bidirectional Client
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{ClaudeClient, ClaudeAgentOptions, Message, PermissionMode};
+//! use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions, Message, PermissionMode};
 //! use futures::StreamExt;
 //!
 //! #[tokio::main]
@@ -128,7 +128,7 @@
 //! ### Example: Query with Image
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{query_with_content, UserContentBlock, Message, ContentBlock};
+//! use claude_code_agent_sdk::{query_with_content, UserContentBlock, Message, ContentBlock};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -159,7 +159,7 @@
 //! ### Example: Using Image URLs
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{query_with_content, UserContentBlock};
+//! use claude_code_agent_sdk::{query_with_content, UserContentBlock};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -175,7 +175,7 @@
 //! ### Example: Streaming with Images
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{query_stream_with_content, UserContentBlock, Message, ContentBlock};
+//! use claude_code_agent_sdk::{query_stream_with_content, UserContentBlock, Message, ContentBlock};
 //! use futures::StreamExt;
 //!
 //! #[tokio::main]
@@ -208,7 +208,7 @@
 //! The SDK provides extensive configuration through [`ClaudeAgentOptions`]:
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::{ClaudeAgentOptions, PermissionMode, SdkPluginConfig};
+//! use claude_code_agent_sdk::{ClaudeAgentOptions, PermissionMode, SdkPluginConfig};
 //!
 //! let options = ClaudeAgentOptions::builder()
 //!     .model("claude-opus-4")
@@ -242,7 +242,7 @@
 //! ### Basic Usage (Console Logging)
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::query;
+//! use claude_code_agent_sdk::query;
 //! use tracing_subscriber;
 //!
 //! #[tokio::main]
@@ -262,7 +262,7 @@
 //! To export traces to OpenTelemetry-compatible backends (Jaeger, OTel, etc.):
 //!
 //! ```no_run
-//! use claude_agent_sdk_rs::query;
+//! use claude_code_agent_sdk::query;
 //! use tracing_subscriber::{Registry, prelude::*};
 //! use tracing_opentelemetry::OpenTelemetryLayer;
 //! use opentelemetry_otlp;
@@ -326,13 +326,13 @@
 //!
 //! ```bash
 //! # Show all SDK logs
-//! RUST_LOG=claude_agent_sdk_rs=debug cargo run
+//! RUST_LOG=claude_code_agent_sdk=debug cargo run
 //!
 //! # Show only errors
-//! RUST_LOG=claude_agent_sdk_rs=error cargo run
+//! RUST_LOG=claude_code_agent_sdk=error cargo run
 //!
 //! # Combine with other crates
-//! RUST_LOG=claude_agent_sdk_rs=info,tokio=warn cargo run
+//! RUST_LOG=claude_code_agent_sdk=info,tokio=warn cargo run
 //! ```
 
 pub mod client;

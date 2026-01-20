@@ -26,7 +26,7 @@ pub const ACP_TOOL_PREFIX: &str = "mcp__acp__";
 /// # Example
 ///
 /// ```
-/// use claude_agent_sdk_rs::acp_tool_name;
+/// use claude_code_agent_sdk::acp_tool_name;
 ///
 /// assert_eq!(acp_tool_name("Bash"), "mcp__acp__Bash");
 /// assert_eq!(acp_tool_name("Read"), "mcp__acp__Read");
@@ -40,7 +40,7 @@ pub fn acp_tool_name(tool_name: &str) -> String {
 /// # Example
 ///
 /// ```
-/// use claude_agent_sdk_rs::is_acp_tool;
+/// use claude_code_agent_sdk::is_acp_tool;
 ///
 /// assert!(is_acp_tool("mcp__acp__Bash"));
 /// assert!(!is_acp_tool("Bash"));
@@ -57,7 +57,7 @@ pub fn is_acp_tool(tool_name: &str) -> bool {
 /// # Example
 ///
 /// ```
-/// use claude_agent_sdk_rs::strip_acp_prefix;
+/// use claude_code_agent_sdk::strip_acp_prefix;
 ///
 /// assert_eq!(strip_acp_prefix("mcp__acp__Bash"), "Bash");
 /// assert_eq!(strip_acp_prefix("Bash"), "Bash");

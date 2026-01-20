@@ -6,7 +6,7 @@ use futures::stream::StreamExt;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -63,6 +63,10 @@ struct IncomingControlRequest {
 }
 
 /// Full Query implementation with bidirectional control protocol
+///
+/// Each QueryFull instance is completely isolated with its own message channels.
+/// This is the Codex-style architecture where each session has its own QueryFull,
+/// ensuring complete message isolation without any routing logic.
 pub struct QueryFull {
     pub(crate) transport: Arc<Mutex<Box<dyn Transport>>>,
     hook_callbacks: Arc<Mutex<HashMap<String, HookCallback>>>,
@@ -79,62 +83,21 @@ pub struct QueryFull {
     initialization_result: Arc<Mutex<Option<serde_json::Value>>>,
     // Configurable timeout for control requests
     control_request_timeout: Option<Duration>,
-    // Query-scoped receivers: query_id -> message channel (for message isolation)
-    // Note: This field is retained for backward compatibility but is not used
-    // in isolated QueryFull instances created via new_isolated()
-    query_receivers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<serde_json::Value>>>>,
-    // Counter for generating unique query IDs
-    next_query_id: AtomicU64,
-    // Current active query_id for routing ResultMessages
-    // This ensures ResultMessages go to the most recent query
-    // Note: This field is retained for backward compatibility but is not used
-    // in isolated QueryFull instances created via new_isolated()
-    current_query_id: Arc<Mutex<Option<String>>>,
-    // Flag indicating if this QueryFull is in isolated mode
-    // Isolated mode means each query has its own channels without routing
-    is_isolated: AtomicBool,
 }
 
 impl QueryFull {
-    /// Create a new Query with default timeout (60 seconds)
+    /// Create a new Query (Codex-style isolated architecture)
     ///
-    /// This creates a QueryFull in non-isolated mode, which uses
-    /// query-scoped receivers for message routing. For new code,
-    /// prefer using `new_isolated()` for complete message isolation.
-    pub fn new(transport: Box<dyn Transport>) -> Self {
-        let (message_tx, message_rx) = mpsc::unbounded_channel();
-
-        Self {
-            transport: Arc::new(Mutex::new(transport)),
-            hook_callbacks: Arc::new(Mutex::new(HashMap::new())),
-            sdk_mcp_servers: Arc::new(Mutex::new(HashMap::new())),
-            can_use_tool: Arc::new(Mutex::new(None)),
-            next_callback_id: Arc::new(AtomicU64::new(0)),
-            request_counter: Arc::new(AtomicU64::new(0)),
-            pending_responses: Arc::new(Mutex::new(HashMap::new())),
-            message_tx,
-            message_rx: Arc::new(Mutex::new(message_rx)),
-            stdin: None,
-            initialization_result: Arc::new(Mutex::new(None)),
-            control_request_timeout: Some(DEFAULT_CONTROL_REQUEST_TIMEOUT),
-            query_receivers: Arc::new(Mutex::new(HashMap::new())),
-            next_query_id: AtomicU64::new(0),
-            current_query_id: Arc::new(Mutex::new(None)),
-            is_isolated: AtomicBool::new(false),
-        }
-    }
-
-    /// Create a new isolated Query (Codex-style architecture)
+    /// Each QueryFull instance is completely isolated with its own message channels.
+    /// This is the Codex-style architecture where each session has its own QueryFull,
+    /// ensuring complete message isolation without any routing logic.
     ///
-    /// This creates a QueryFull instance in isolated mode, where each query
-    /// has its own completely independent message channels. No routing is needed
-    /// because each QueryFull handles only one query at a time.
+    /// # Architecture Benefits
     ///
-    /// This is the recommended approach for new code, as it provides:
-    /// - Complete message isolation
+    /// - Complete message isolation between sessions
     /// - No possibility of message confusion
-    /// - Simpler architecture without routing logic
-    /// - Better performance (no routing overhead)
+    /// - Simple architecture without routing overhead
+    /// - Better performance (no HashMap lookups)
     ///
     /// # Arguments
     ///
@@ -152,12 +115,12 @@ impl QueryFull {
     ///     QueryPrompt::Streaming,
     ///     ClaudeAgentOptions::default(),
     /// ).unwrap();
-    /// let query = QueryFull::new_isolated(Box::new(transport)).unwrap();
+    /// let query = QueryFull::new(Box::new(transport));
     /// ```
-    pub fn new_isolated(transport: Box<dyn Transport>) -> Result<Self> {
+    pub fn new(transport: Box<dyn Transport>) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
-        Ok(Self {
+        Self {
             transport: Arc::new(Mutex::new(transport)),
             hook_callbacks: Arc::new(Mutex::new(HashMap::new())),
             sdk_mcp_servers: Arc::new(Mutex::new(HashMap::new())),
@@ -170,11 +133,16 @@ impl QueryFull {
             stdin: None,
             initialization_result: Arc::new(Mutex::new(None)),
             control_request_timeout: Some(DEFAULT_CONTROL_REQUEST_TIMEOUT),
-            query_receivers: Arc::new(Mutex::new(HashMap::new())),
-            next_query_id: AtomicU64::new(0),
-            current_query_id: Arc::new(Mutex::new(None)),
-            is_isolated: AtomicBool::new(true),
-        })
+        }
+    }
+
+    /// Create a new isolated Query (alias for new() for backward compatibility)
+    ///
+    /// This is an alias for `new()` since all QueryFull instances are now isolated.
+    /// Kept for backward compatibility with existing code.
+    #[deprecated(note = "Use QueryFull::new() instead - all instances are now isolated")]
+    pub fn new_isolated(transport: Box<dyn Transport>) -> Result<Self> {
+        Ok(Self::new(transport))
     }
 
     /// Check if this QueryFull is still active
@@ -210,114 +178,6 @@ impl QueryFull {
         *self.sdk_mcp_servers.lock().await = servers;
     }
 
-    /// Drain any pending messages from the message channel
-    ///
-    /// This is called before sending a new prompt to ensure we don't
-    /// receive stale messages from a previous (cancelled) prompt.
-    ///
-    /// # Returns
-    ///
-    /// The number of messages drained
-    pub async fn drain_pending_messages(&self) -> usize {
-        let mut rx = self.message_rx.lock().await;
-        let mut count = 0;
-
-        // Try to receive messages without blocking
-        // Use try_recv to avoid waiting
-        while let Ok(_) = rx.try_recv() {
-            count += 1;
-
-            // Log warning at intervals to track draining progress
-            if count == 100 {
-                tracing::warn!(
-                    count,
-                    "Drained 100 pending messages, continuing..."
-                );
-            } else if count == 1000 {
-                tracing::warn!(
-                    count,
-                    "Drained 1000 pending messages, continuing to drain..."
-                );
-            } else if count == 10000 {
-                tracing::error!(
-                    count,
-                    "Drained 10000 pending messages! This may indicate a serious issue. Continuing to drain to prevent message buildup."
-                );
-            } else if count > 100000 {
-                // Safety limit to prevent true infinite loops
-                tracing::error!(
-                    count,
-                    "Drained over 100000 pending messages! Aborting to prevent potential infinite loop."
-                );
-                break;
-            }
-        }
-
-        if count > 0 {
-            tracing::debug!(
-                count,
-                "Drained pending messages from message channel"
-            );
-        }
-
-        // Also clean up any stale pending responses
-        // This prevents memory leaks from cancelled control requests
-        let mut pending = self.pending_responses.lock().await;
-        let before_len = pending.len();
-        // Remove any responses where the sender has been dropped
-        pending.retain(|_, sender| !sender.is_closed());
-        let after_len = pending.len();
-        if before_len != after_len {
-            tracing::debug!(
-                before_len,
-                after_len,
-                "Cleaned up stale pending responses"
-            );
-        }
-
-        count
-    }
-
-    // ========================================================================
-    // Query-Scoped Message Channel Methods
-    // ========================================================================
-    // These methods provide per-query message isolation to prevent
-    // ResultMessage confusion when prompts are sent in quick succession.
-
-    /// Generate a unique query ID for message routing
-    ///
-    /// Query IDs are used to isolate messages from different prompts,
-    /// preventing late-arriving ResultMessages from being consumed
-    /// by the wrong prompt.
-    pub fn generate_query_id(&self) -> String {
-        format!(
-            "query_{}_{}",
-            self.next_query_id.fetch_add(1, Ordering::SeqCst),
-            uuid::Uuid::new_v4().simple()
-        )
-    }
-
-    /// Register a query-specific receiver
-    ///
-    /// This creates an isolated message channel for a specific query.
-    /// The query_id is also tracked as the "current" query for routing
-    /// ResultMessages that don't have an explicit query_id.
-    ///
-    /// # Returns
-    ///
-    /// A receiver that will only receive messages for this query.
-    pub async fn register_query_receiver(
-        &self,
-        query_id: String,
-    ) -> mpsc::UnboundedReceiver<serde_json::Value> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.query_receivers.lock().await.insert(query_id.clone(), tx);
-
-        // Set this as the current active query_id for ResultMessage routing
-        *self.current_query_id.lock().await = Some(query_id);
-
-        rx
-    }
 
     /// Initialize with hooks
     #[instrument(name = "claude.query_full.initialize", skip(self, hooks))]
@@ -402,10 +262,6 @@ impl QueryFull {
         let pending_responses = Arc::clone(&self.pending_responses);
         let message_tx = self.message_tx.clone();
         let stdin = self.stdin.clone();
-        let query_receivers = Arc::clone(&self.query_receivers);
-        let current_query_id = Arc::clone(&self.current_query_id);
-        // Read is_isolated value at start time (AtomicBool can be copied by value)
-        let is_isolated_value = self.is_isolated.load(Ordering::Relaxed);
 
         // Create a channel to signal when background task is ready
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -514,96 +370,17 @@ impl QueryFull {
                             }
                             _ => {
                                 // ====================================================================
-                                // QUERY-SCOPED MESSAGE ROUTING
+                                // ISOLATED QUERY ARCHITECTURE (Codex-style)
                                 // ====================================================================
-                                // Route messages to query-specific receivers for isolation.
-                                // This prevents late-arriving ResultMessages from being
-                                // consumed by the wrong prompt.
+                                // Each QueryFull instance is completely isolated.
+                                // Messages are sent directly to the message_tx channel
+                                // without any routing logic.
                                 //
-                                // In isolated mode (Codex-style), each QueryFull handles only
-                                // one query, so we skip the routing logic and send directly
-                                // to the message_tx channel.
+                                // This ensures complete message isolation between sessions
+                                // and eliminates the possibility of message confusion.
 
-                                let mut routed = false;
-
-                                // Check if we're in isolated mode
-                                let isolated = query_receivers
-                                    .try_lock()
-                                    .map_or(false, |guard| guard.is_empty())
-                                    && is_isolated_value;
-
-                                if isolated {
-                                    // Isolated mode: send directly to message_tx
-                                    // No routing needed because this QueryFull handles only one query
-                                    tracing::trace!("Isolated mode: sending message directly to channel");
-                                    let _ = message_tx.send(message);
-                                    routed = true;
-                                } else {
-                                    // Non-isolated mode: use query-scoped routing
-                                    // IMPORTANT: To avoid deadlock, we must acquire locks in consistent order
-
-                                    // First, get current_query_id while holding NO other locks
-                                    let current_id = current_query_id.lock().await.clone();
-
-                                    // Then, lock query_receivers and route the message
-                                    let receivers = query_receivers.lock().await;
-                                    if !receivers.is_empty() {
-                                        // For ResultMessage, route to current active query
-                                        if msg_type == Some("result") {
-                                            // ResultMessages should go to the current active query
-                                            // to prevent late-arriving messages from being consumed
-                                            // by the wrong prompt
-                                            if let Some(active_query_id) = current_id {
-                                                if let Some(tx) = receivers.get(&active_query_id) {
-                                                    if tx.send(message.clone()).is_ok() {
-                                                        routed = true;
-                                                        tracing::trace!(
-                                                            query_id = %active_query_id,
-                                                            "Routed ResultMessage to current active query receiver"
-                                                        );
-                                                    } else {
-                                                        // Receiver closed, fall back to first available
-                                                        tracing::warn!(
-                                                            query_id = %active_query_id,
-                                                            "Current query receiver closed, trying fallback"
-                                                        );
-                                                    }
-                                                }
-                                            }
-
-                                            // Fallback: if current receiver failed, try any available receiver
-                                            if !routed {
-                                                if let Some((_, tx)) = receivers.iter().next() {
-                                                    if tx.send(message.clone()).is_ok() {
-                                                        routed = true;
-                                                        tracing::warn!(
-                                                            "Routed ResultMessage to fallback receiver (may indicate race condition)"
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            // For non-Result messages, broadcast to all receivers
-                                            let mut send_count = 0;
-                                            for (_, tx) in receivers.iter() {
-                                                if tx.send(message.clone()).is_ok() {
-                                                    send_count += 1;
-                                                }
-                                            }
-
-                                            if send_count > 0 {
-                                                routed = true;
-                                                tracing::trace!(send_count, "Broadcast message to query receivers");
-                                            }
-                                        }
-                                    }
-
-                                    // Fallback: if no query receivers or routing failed, send to global channel
-                                    if !routed {
-                                        tracing::trace!("No query receivers, using global channel");
-                                        let _ = message_tx.send(message);
-                                    }
-                                }
+                                tracing::trace!("Sending message directly to isolated channel");
+                                let _ = message_tx.send(message);
                             }
                         }
                     }
@@ -620,74 +397,8 @@ impl QueryFull {
             .await
             .map_err(|_| ClaudeError::Transport("Background task failed to start".to_string()))?;
 
-        // Start cleanup task to remove stale receivers
-        self.start_cleanup_task();
-
         info!("Background message reader started");
         Ok(())
-    }
-
-    /// Start cleanup task to remove stale receivers
-    ///
-    /// This runs a background task that periodically cleans up query receivers
-    /// whose associated channels have been closed. This prevents memory leaks
-    /// when streams are dropped without explicit cleanup.
-    fn start_cleanup_task(&self) {
-        let query_receivers = Arc::clone(&self.query_receivers);
-        let current_query_id = Arc::clone(&self.current_query_id);
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-            loop {
-                interval.tick().await;
-
-                // Collect removed query_ids to check if we need to clear current_query_id
-                let mut removed_query_ids = Vec::new();
-
-                {
-                    let mut receivers = query_receivers.lock().await;
-                    let before_count = receivers.len();
-
-                    // Collect query_ids that will be removed
-                    for (query_id, tx) in receivers.iter() {
-                        if tx.is_closed() {
-                            removed_query_ids.push(query_id.clone());
-                        }
-                    }
-
-                    // Remove receivers where the sender is closed (receiver was dropped)
-                    receivers.retain(|_, tx| tx.is_closed() == false);
-
-                    let after_count = receivers.len();
-                    let removed = before_count - after_count;
-
-                    if removed > 0 {
-                        debug!(
-                            removed_receivers = removed,
-                            active_receivers = after_count,
-                            "Cleaned up stale query receivers"
-                        );
-                    }
-                }
-
-                // Clear current_query_id if it was among the removed receivers
-                if !removed_query_ids.is_empty() {
-                    // Clone the current value to check without holding lock
-                    let current_value = current_query_id.lock().await.clone();
-                    if let Some(current) = current_value {
-                        if removed_query_ids.contains(&current) {
-                            let mut current_id = current_query_id.lock().await;
-                            *current_id = None;
-                            debug!(
-                                query_id = %current,
-                                "Cleared current_query_id (receiver was cleaned up)"
-                            );
-                        }
-                    }
-                }
-            }
-        });
     }
 
     /// Handle incoming control request from CLI (new version using stdin directly)
@@ -1491,130 +1202,4 @@ mod tests {
         assert_eq!(received_input.lock().await["content"], "hello");
     }
 
-    // ========================================================================
-    // Query-Scoped Message Channel Tests
-    // ========================================================================
-
-    #[tokio::test]
-    async fn test_generate_query_id_unique() {
-        use crate::internal::transport::subprocess::SubprocessTransport;
-
-        // Create a QueryFull instance (using a mock transport)
-        let transport = SubprocessTransport::new(
-            crate::internal::transport::subprocess::QueryPrompt::Streaming,
-            crate::types::config::ClaudeAgentOptions::default(),
-        )
-        .unwrap();
-
-        let query = QueryFull::new(Box::new(transport));
-
-        // Generate multiple query IDs and verify they are unique
-        let id1 = query.generate_query_id();
-        let id2 = query.generate_query_id();
-        let id3 = query.generate_query_id();
-
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-        assert_ne!(id1, id3);
-
-        // Verify format: query_<counter>_<uuid>
-        assert!(id1.starts_with("query_"));
-        assert!(id2.starts_with("query_"));
-        assert!(id3.starts_with("query_"));
-    }
-
-    #[tokio::test]
-    async fn test_register_query_receiver_sets_current() {
-        use crate::internal::transport::subprocess::SubprocessTransport;
-
-        let transport = SubprocessTransport::new(
-            crate::internal::transport::subprocess::QueryPrompt::Streaming,
-            crate::types::config::ClaudeAgentOptions::default(),
-        )
-        .unwrap();
-
-        let query = QueryFull::new(Box::new(transport));
-
-        // Register first receiver
-        let id1 = query.generate_query_id();
-        let _rx1 = query.register_query_receiver(id1.clone()).await;
-
-        // Verify current_query_id is set to id1
-        let current = query.current_query_id.lock().await;
-        assert_eq!(current.as_ref(), Some(&id1));
-
-        // Register second receiver
-        let id2 = query.generate_query_id();
-        let _rx2 = query.register_query_receiver(id2.clone()).await;
-
-        // Verify current_query_id is updated to id2
-        let current = query.current_query_id.lock().await;
-        assert_eq!(current.as_ref(), Some(&id2));
-    }
-
-    #[tokio::test]
-    async fn test_multiple_receivers_in_map() {
-        use crate::internal::transport::subprocess::SubprocessTransport;
-        use tokio::sync::mpsc;
-
-        let transport = SubprocessTransport::new(
-            crate::internal::transport::subprocess::QueryPrompt::Streaming,
-            crate::types::config::ClaudeAgentOptions::default(),
-        )
-        .unwrap();
-
-        let query = QueryFull::new(Box::new(transport));
-
-        // Register multiple receivers
-        let id1 = query.generate_query_id();
-        let id2 = query.generate_query_id();
-        let id3 = query.generate_query_id();
-
-        let _rx1 = query.register_query_receiver(id1.clone()).await;
-        let _rx2 = query.register_query_receiver(id2.clone()).await;
-        let _rx3 = query.register_query_receiver(id3.clone()).await;
-
-        // Verify all receivers are in the map
-        let receivers = query.query_receivers.lock().await;
-        assert_eq!(receivers.len(), 3);
-        assert!(receivers.contains_key(&id1));
-        assert!(receivers.contains_key(&id2));
-        assert!(receivers.contains_key(&id3));
-
-        // Verify current_query_id is the last one registered
-        let current = query.current_query_id.lock().await;
-        assert_eq!(current.as_ref(), Some(&id3));
-    }
-
-    #[tokio::test]
-    async fn test_current_query_id_updates_on_new_registration() {
-        use crate::internal::transport::subprocess::SubprocessTransport;
-
-        let transport = SubprocessTransport::new(
-            crate::internal::transport::subprocess::QueryPrompt::Streaming,
-            crate::types::config::ClaudeAgentOptions::default(),
-        )
-        .unwrap();
-
-        let query = QueryFull::new(Box::new(transport));
-
-        // Simulate concurrent query scenario:
-        // Query A starts and registers
-        // Query B starts and registers (should become current)
-        // ResultMessage should go to B (the most recent/current)
-
-        let id_a = query.generate_query_id();
-        let id_b = query.generate_query_id();
-
-        let _rx_a = query.register_query_receiver(id_a.clone()).await;
-        let current_after_a = query.current_query_id.lock().await;
-        assert_eq!(current_after_a.as_ref(), Some(&id_a));
-
-        let _rx_b = query.register_query_receiver(id_b.clone()).await;
-        let current_after_b = query.current_query_id.lock().await;
-        assert_eq!(current_after_b.as_ref(), Some(&id_b));
-
-        // current_query_id should now be id_b, not id_a
-        assert_ne!(current_after_b.as_ref(), Some(&id_a));
-    }
 }
