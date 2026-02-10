@@ -163,7 +163,9 @@ impl ClaudeClient {
         // which ensures CLI uses control protocol for permission prompts
         let mut options = self.options.clone();
         if options.can_use_tool.is_some() && options.permission_prompt_tool_name.is_none() {
-            info!("can_use_tool callback is set, automatically setting permission_prompt_tool_name to 'stdio'");
+            info!(
+                "can_use_tool callback is set, automatically setting permission_prompt_tool_name to 'stdio'"
+            );
             options.permission_prompt_tool_name = Some("stdio".to_string());
         }
 
@@ -250,7 +252,9 @@ impl ClaudeClient {
         // Set configuration on QueryManager
         query_manager.set_hooks(hooks).await;
         query_manager.set_sdk_mcp_servers(sdk_mcp_servers).await;
-        query_manager.set_can_use_tool(self.options.can_use_tool.clone()).await;
+        query_manager
+            .set_can_use_tool(self.options.can_use_tool.clone())
+            .await;
 
         // Serialize agents to JSON Value for the initialize request body
         // This avoids OS ARG_MAX limits from passing large agent definitions via CLI flags
@@ -352,7 +356,9 @@ impl ClaudeClient {
         let session_id_str = session_id.into();
 
         // Get or create query for this session (reuses existing query to maintain context)
-        let query_id = query_manager.get_or_create_session_query(&session_id_str).await?;
+        let query_id = query_manager
+            .get_or_create_session_query(&session_id_str)
+            .await?;
         self.current_query_id = Some(query_id.clone());
 
         // Get the isolated query
@@ -495,7 +501,9 @@ impl ClaudeClient {
         let session_id_str = session_id.into();
 
         // Get or create query for this session (reuses existing query to maintain context)
-        let query_id = query_manager.get_or_create_session_query(&session_id_str).await?;
+        let query_id = query_manager
+            .get_or_create_session_query(&session_id_str)
+            .await?;
         self.current_query_id = Some(query_id.clone());
 
         // Get the isolated query

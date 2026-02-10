@@ -176,11 +176,15 @@ mod bundled_cli {
         );
 
         let status = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &install_cmd])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &install_cmd,
+            ])
             .status()
-            .unwrap_or_else(|e| {
-                panic!("Failed to execute PowerShell install script: {}", e)
-            });
+            .unwrap_or_else(|e| panic!("Failed to execute PowerShell install script: {}", e));
 
         if !status.success() {
             panic!(
@@ -197,12 +201,15 @@ mod bundled_cli {
             home.join(".local\\bin\\claude.exe"),
         ];
 
-        let installed_cli = possible_paths.iter().find(|p| p.exists()).unwrap_or_else(|| {
-            panic!(
-                "Could not find installed CLI binary. Checked: {:?}",
-                possible_paths
-            )
-        });
+        let installed_cli = possible_paths
+            .iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not find installed CLI binary. Checked: {:?}",
+                    possible_paths
+                )
+            });
 
         // Atomic write: copy to temp, then rename
         let tmp_path = bundled_dir.join(".claude.exe.tmp");
@@ -251,9 +258,7 @@ mod bundled_cli {
     fn dirs_home() -> PathBuf {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
-            .expect(
-                "HOME or USERPROFILE environment variable must be set to download bundled CLI",
-            );
+            .expect("HOME or USERPROFILE environment variable must be set to download bundled CLI");
         PathBuf::from(home)
     }
 
@@ -271,8 +276,8 @@ mod bundled_cli {
     /// We parse the source file directly instead of depending on the crate,
     /// because build.rs runs before the crate is compiled.
     fn parse_cli_version() -> String {
-        let version_rs = std::fs::read_to_string("src/version.rs")
-            .expect("Failed to read src/version.rs");
+        let version_rs =
+            std::fs::read_to_string("src/version.rs").expect("Failed to read src/version.rs");
 
         for line in version_rs.lines() {
             let trimmed = line.trim();
@@ -284,9 +289,7 @@ mod bundled_cli {
                         // Validate: must be digits and dots only (semver x.y.z)
                         assert!(
                             !version.is_empty()
-                                && version
-                                    .chars()
-                                    .all(|c| c.is_ascii_digit() || c == '.'),
+                                && version.chars().all(|c| c.is_ascii_digit() || c == '.'),
                             "CLI_VERSION contains invalid characters: '{}'",
                             version
                         );

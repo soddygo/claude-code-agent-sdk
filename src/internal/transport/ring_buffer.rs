@@ -3,7 +3,7 @@
 //! Uses ringbuf library to implement an auto-managed circular buffer
 //! that automatically overwrites old data when full, keeping memory usage stable.
 
-use ringbuf::{traits::*, HeapRb};
+use ringbuf::{HeapRb, traits::*};
 use std::io;
 
 /// Circular buffer wrapper using ringbuf

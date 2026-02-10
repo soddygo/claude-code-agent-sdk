@@ -653,10 +653,7 @@ mod tests {
                 assert_eq!(subagent.session_id, "test-session");
                 assert!(!subagent.stop_hook_active);
                 assert_eq!(subagent.agent_id, "agent-1");
-                assert_eq!(
-                    subagent.agent_transcript_path,
-                    "/path/to/agent/transcript"
-                );
+                assert_eq!(subagent.agent_transcript_path, "/path/to/agent/transcript");
                 assert_eq!(subagent.agent_type, "code");
             }
             _ => panic!("Expected SubagentStop variant"),
@@ -1233,11 +1230,9 @@ mod tests {
     #[test]
     fn test_new_hook_specific_outputs_serialization() {
         // PostToolUseFailure
-        let output = HookSpecificOutput::PostToolUseFailure(
-            PostToolUseFailureHookSpecificOutput {
-                additional_context: Some("Retry suggested".to_string()),
-            },
-        );
+        let output = HookSpecificOutput::PostToolUseFailure(PostToolUseFailureHookSpecificOutput {
+            additional_context: Some("Retry suggested".to_string()),
+        });
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["hookEventName"], "PostToolUseFailure");
         assert_eq!(json["additionalContext"], "Retry suggested");
@@ -1258,11 +1253,9 @@ mod tests {
         assert_eq!(json["hookEventName"], "SubagentStart");
 
         // PermissionRequest
-        let output = HookSpecificOutput::PermissionRequest(
-            PermissionRequestHookSpecificOutput {
-                decision: Some(json!({"allow": true})),
-            },
-        );
+        let output = HookSpecificOutput::PermissionRequest(PermissionRequestHookSpecificOutput {
+            decision: Some(json!({"allow": true})),
+        });
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["hookEventName"], "PermissionRequest");
         assert_eq!(json["decision"]["allow"], true);

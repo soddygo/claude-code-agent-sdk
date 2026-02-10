@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-agent-sdk"
-version = "0.1.37"
+version = "0.1.38"
 authors = ["soddygo <soddygo@qq.com>"]
 edition = "2024"
 rust-version = "1.90"
@@ -63,6 +63,10 @@ paste = "1.0"
 
 # Circular buffer for SDK transport
 ringbuf = "0.4"
+
+# Unix file locking for concurrent CLI download safety
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"

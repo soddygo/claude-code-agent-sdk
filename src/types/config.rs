@@ -146,6 +146,16 @@ pub struct ClaudeAgentOptions {
     /// backwards compatibility but has no effect.
     #[builder(default = true)]
     pub verbose: bool,
+    /// Enable automatic CLI download when Claude Code CLI is not found.
+    ///
+    /// When `true`, if `find_cli()` exhausts all discovery strategies, it will
+    /// attempt to download the CLI binary to `~/.claude/sdk/bundled/` as a last
+    /// resort. This involves running the official install script from
+    /// `https://claude.ai/install.sh` (Unix) or `https://claude.ai/install.ps1` (Windows).
+    ///
+    /// Default is `false` — the SDK will not make network requests unless explicitly opted in.
+    #[builder(default = false)]
+    pub auto_download_cli: bool,
     /// Efficiency tracking and hook injection configuration
     #[builder(default, setter(strip_option))]
     pub efficiency: Option<EfficiencyConfig>,

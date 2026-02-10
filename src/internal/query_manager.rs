@@ -50,9 +50,7 @@ pub struct QueryManager {
     session_queries: DashMap<String, String>,
 
     /// Shared transport factory (for creating new CLI connections)
-    transport_factory: Arc<
-        Mutex<dyn Fn() -> Result<Box<dyn Transport>> + Send + Sync + 'static>,
-    >,
+    transport_factory: Arc<Mutex<dyn Fn() -> Result<Box<dyn Transport>> + Send + Sync + 'static>>,
 
     /// Configuration for query initialization
     hooks: Arc<Mutex<Option<HashMap<String, Vec<crate::types::hooks::HookMatcher>>>>>,
@@ -117,7 +115,10 @@ impl QueryManager {
     }
 
     /// Set hooks for query initialization
-    pub async fn set_hooks(&self, hooks: Option<HashMap<String, Vec<crate::types::hooks::HookMatcher>>>) {
+    pub async fn set_hooks(
+        &self,
+        hooks: Option<HashMap<String, Vec<crate::types::hooks::HookMatcher>>>,
+    ) {
         *self.hooks.lock().await = hooks;
     }
 
@@ -169,7 +170,9 @@ impl QueryManager {
         };
 
         // Connect the transport
-        transport.connect().await
+        transport
+            .connect()
+            .await
             .map_err(|e| ClaudeError::Transport(format!("Failed to connect transport: {}", e)))?;
 
         // Extract stdin for direct access (avoids transport lock deadlock)
@@ -230,9 +233,7 @@ impl QueryManager {
         self.queries
             .get(query_id)
             .map(|v| v.value().clone())
-            .ok_or_else(|| {
-                ClaudeError::InvalidConfig(format!("Query not found: {}", query_id))
-            })
+            .ok_or_else(|| ClaudeError::InvalidConfig(format!("Query not found: {}", query_id)))
     }
 
     /// Get or create a query for a specific session
@@ -289,7 +290,8 @@ impl QueryManager {
         let query_id = self.create_query().await?;
 
         // Map session to this query
-        self.session_queries.insert(session_id.to_string(), query_id.clone());
+        self.session_queries
+            .insert(session_id.to_string(), query_id.clone());
 
         tracing::info!(
             session_id = %session_id,
@@ -312,9 +314,7 @@ impl QueryManager {
     pub fn remove_query(&self, query_id: &str) -> Result<()> {
         self.queries
             .remove(query_id)
-            .ok_or_else(|| {
-                ClaudeError::InvalidConfig(format!("Query not found: {}", query_id))
-            })?;
+            .ok_or_else(|| ClaudeError::InvalidConfig(format!("Query not found: {}", query_id)))?;
         info!(query_id = %query_id, "Removed query");
         Ok(())
     }

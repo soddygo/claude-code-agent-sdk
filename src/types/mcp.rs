@@ -487,11 +487,7 @@ mod tests {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
             input_schema: json!({"type": "object"}),
-            annotations: Some(
-                ToolAnnotations::builder()
-                    .read_only_hint(true)
-                    .build(),
-            ),
+            annotations: Some(ToolAnnotations::builder().read_only_hint(true).build()),
         };
 
         assert_eq!(def.name, "test_tool");

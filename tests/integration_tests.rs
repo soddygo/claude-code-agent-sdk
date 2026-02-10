@@ -15,8 +15,8 @@
 //! 3. The API accepts session_id parameters without errors
 
 use claude_code_agent_sdk::{
-    ClaudeAgentOptions, ClaudeClient, HookEvent, HookInput, HookJsonOutput, HookMatcher, Message,
-    PermissionMode, SdkPluginConfig, SyncHookJsonOutput, AgentDefinition,
+    AgentDefinition, ClaudeAgentOptions, ClaudeClient, HookEvent, HookInput, HookJsonOutput,
+    HookMatcher, Message, PermissionMode, SdkPluginConfig, SyncHookJsonOutput,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1106,8 +1106,8 @@ fn test_bundled_cli_exists() {
 fn test_bundled_cli_version_matches() {
     use claude_code_agent_sdk::CLI_VERSION;
 
-    let path = claude_code_agent_sdk::version::bundled_cli_path()
-        .expect("Should have a bundled path");
+    let path =
+        claude_code_agent_sdk::version::bundled_cli_path().expect("Should have a bundled path");
 
     let output = std::process::Command::new(&path)
         .arg("--version")

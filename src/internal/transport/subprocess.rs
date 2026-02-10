@@ -23,8 +23,8 @@ use crate::version::{
     ENTRYPOINT, MIN_CLI_VERSION, SDK_VERSION, SKIP_VERSION_CHECK_ENV, check_version,
 };
 
-use super::ring_buffer::CircularBuffer;
 use super::Transport;
+use super::ring_buffer::CircularBuffer;
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 20 * 1024 * 1024; // 20MB
 
@@ -94,7 +94,7 @@ impl SubprocessTransport {
         let cli_path = if let Some(ref path) = options.cli_path {
             path.clone()
         } else {
-            Self::find_cli()?
+            Self::find_cli(&options)?
         };
 
         let cwd = options.cwd.clone().or_else(|| std::env::current_dir().ok());
@@ -115,7 +115,7 @@ impl SubprocessTransport {
     }
 
     /// Find the Claude CLI executable
-    fn find_cli() -> Result<PathBuf> {
+    fn find_cli(options: &ClaudeAgentOptions) -> Result<PathBuf> {
         // Strategy 0 (bundled): Check bundled CLI path
         // ~/.claude/sdk/bundled/{CLI_VERSION}/claude
         // Always checked regardless of bundled-cli feature (path won't exist if not downloaded)
@@ -125,6 +125,57 @@ impl SubprocessTransport {
         {
             info!("Using bundled Claude CLI: {}", bundled_path.display());
             return Ok(bundled_path);
+        }
+
+        // Strategy 0.5 (adjacent): Check for CLI next to the current executable.
+        // This supports cargo-dist packaging where both binaries are in the same archive.
+        // After `npm install`, the CLI binary sits next to the agent binary.
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(exe_dir) = exe_path
+                .canonicalize()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
+            let cli_name = if cfg!(target_os = "windows") {
+                "claude.exe"
+            } else {
+                "claude"
+            };
+            let adjacent_path = exe_dir.join(cli_name);
+            if adjacent_path.exists() && adjacent_path.is_file() {
+                // Verify the adjacent binary is actually a Claude CLI with a valid version
+                if let Ok(output) = std::process::Command::new(&adjacent_path)
+                    .arg("--version")
+                    .output()
+                    && output.status.success()
+                {
+                    let version_str = String::from_utf8_lossy(&output.stdout);
+                    let version = version_str
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().next())
+                        .unwrap_or("")
+                        .trim();
+                    if check_version(version) {
+                        info!(
+                            "Using adjacent Claude CLI (v{}): {}",
+                            version,
+                            adjacent_path.display()
+                        );
+                        return Ok(adjacent_path);
+                    }
+                    warn!(
+                        "Adjacent Claude CLI at {} has unsupported version '{}', skipping",
+                        adjacent_path.display(),
+                        version
+                    );
+                } else {
+                    warn!(
+                        "Adjacent binary at {} is not a valid Claude CLI, skipping",
+                        adjacent_path.display()
+                    );
+                }
+            }
         }
 
         // Strategy 1: Try executing 'claude' directly from PATH
@@ -224,18 +275,43 @@ impl SubprocessTransport {
             }
         }
 
+        // Strategy 6 (auto-download): Download CLI to bundled path as last resort.
+        // Only triggered when explicitly opted in via auto_download_cli option.
+        // This ensures first-run experience works for npm/binary distribution users
+        // who have explicitly enabled this feature.
+        let mut download_error: Option<String> = None;
+        if options.auto_download_cli {
+            info!(
+                "Claude CLI not found, attempting to download v{}...",
+                crate::version::CLI_VERSION
+            );
+            match crate::version::download_cli() {
+                Ok(path) => {
+                    info!("Claude CLI downloaded to: {}", path.display());
+                    return Ok(path);
+                }
+                Err(e) => {
+                    warn!("Failed to auto-download CLI: {}", e);
+                    download_error = Some(e);
+                }
+            }
+        }
+
+        let mut message = "Claude Code CLI not found. Please ensure 'claude' is in your PATH or set CLAUDE_CLI_PATH environment variable.".to_string();
+        if let Some(dl_err) = download_error {
+            message.push_str(&format!(" Auto-download also failed: {dl_err}"));
+        } else if !options.auto_download_cli {
+            message.push_str(" Hint: set auto_download_cli=true in ClaudeAgentOptions to enable automatic CLI download.");
+        }
+
         Err(ClaudeError::CliNotFound(CliNotFoundError::new(
-            "Claude Code CLI not found. Please ensure 'claude' is in your PATH or set CLAUDE_CLI_PATH environment variable.",
-            None,
+            message, None,
         )))
     }
 
     /// Build command arguments from options
     fn build_command(&self) -> Vec<String> {
-        let mut args = vec![
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-        ];
+        let mut args = vec!["--output-format".to_string(), "stream-json".to_string()];
 
         // Always add --verbose (matches Python SDK behavior which sends it unconditionally)
         args.push("--verbose".to_string());

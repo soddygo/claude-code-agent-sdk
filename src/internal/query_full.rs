@@ -178,7 +178,6 @@ impl QueryFull {
         *self.sdk_mcp_servers.lock().await = servers;
     }
 
-
     /// Initialize with hooks and agents
     #[instrument(name = "claude.query_full.initialize", skip(self, hooks, agents))]
     pub async fn initialize(
@@ -1221,5 +1220,4 @@ mod tests {
         assert_eq!(received_input.lock().await["path"], "/tmp/test.txt");
         assert_eq!(received_input.lock().await["content"], "hello");
     }
-
 }
