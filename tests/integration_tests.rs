@@ -16,7 +16,7 @@
 
 use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, HookEvent, HookInput, HookJsonOutput, HookMatcher, Message,
-    PermissionMode, SdkPluginConfig, SyncHookJsonOutput,
+    PermissionMode, SdkPluginConfig, SyncHookJsonOutput, AgentDefinition,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -338,7 +338,8 @@ fn test_hook_input_formats() {
         "transcript_path": "/path",
         "cwd": "/cwd",
         "tool_name": "Bash",
-        "tool_input": {"command": "test"}
+        "tool_input": {"command": "test"},
+        "tool_use_id": "tool_123"
     });
     let input: HookInput = serde_json::from_value(json).unwrap();
     assert!(matches!(input, HookInput::PreToolUse(_)));
@@ -982,4 +983,148 @@ async fn test_client_query_with_content_integration() -> anyhow::Result<()> {
 
     client.disconnect().await?;
     Ok(())
+}
+
+// ============================================================================
+// Agents Initialize Request Tests
+// ============================================================================
+
+/// Test that agents are serialized correctly for the initialize request body
+#[test]
+fn test_agents_serialized_for_initialize_request() {
+    let mut agents = HashMap::new();
+    agents.insert(
+        "code-reviewer".to_string(),
+        AgentDefinition::builder()
+            .description("Reviews code changes")
+            .prompt("You are a code review expert.")
+            .tools(vec!["Read".to_string(), "Grep".to_string()])
+            .build(),
+    );
+    agents.insert(
+        "test-runner".to_string(),
+        AgentDefinition::builder()
+            .description("Runs tests")
+            .prompt("You run tests and report results.")
+            .build(),
+    );
+
+    // Verify agents serialize to the expected JSON structure
+    let agents_value = serde_json::to_value(&agents).unwrap();
+    assert!(agents_value.is_object());
+
+    let code_reviewer = &agents_value["code-reviewer"];
+    assert_eq!(code_reviewer["description"], "Reviews code changes");
+    assert_eq!(code_reviewer["prompt"], "You are a code review expert.");
+    assert_eq!(code_reviewer["tools"], serde_json::json!(["Read", "Grep"]));
+
+    let test_runner = &agents_value["test-runner"];
+    assert_eq!(test_runner["description"], "Runs tests");
+    assert_eq!(test_runner["prompt"], "You run tests and report results.");
+
+    // Verify the initialize request body structure matches Python SDK format:
+    // {"subtype": "initialize", "hooks": null, "agents": {...}}
+    let mut request = serde_json::json!({
+        "subtype": "initialize",
+        "hooks": serde_json::Value::Null,
+    });
+    request["agents"] = agents_value.clone();
+
+    assert_eq!(request["subtype"], "initialize");
+    assert!(request["agents"].is_object());
+    assert_eq!(
+        request["agents"]["code-reviewer"]["description"],
+        "Reviews code changes"
+    );
+    assert_eq!(
+        request["agents"]["test-runner"]["description"],
+        "Runs tests"
+    );
+}
+
+/// Test that agents are stored in options for initialize request (not CLI args)
+#[test]
+fn test_agents_configured_in_options() {
+    let mut agents = HashMap::new();
+    agents.insert(
+        "helper".to_string(),
+        AgentDefinition::builder()
+            .description("A helper agent")
+            .prompt("Help the user.")
+            .build(),
+    );
+
+    let options = ClaudeAgentOptions::builder()
+        .agents(agents)
+        .max_turns(1)
+        .build();
+
+    // Verify agents are stored in options (will be sent via initialize body)
+    assert!(options.agents.is_some());
+    assert_eq!(options.agents.as_ref().unwrap().len(), 1);
+    assert!(options.agents.as_ref().unwrap().contains_key("helper"));
+}
+
+/// Test that bundled CLI path construction works correctly
+#[test]
+fn test_bundled_cli_path_construction() {
+    use claude_code_agent_sdk::CLI_VERSION;
+
+    // bundled_cli_path() should return Some on systems with a home directory
+    if let Some(path) = claude_code_agent_sdk::version::bundled_cli_path() {
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains(".claude/sdk/bundled"),
+            "Expected path to contain '.claude/sdk/bundled', got: {}",
+            path_str
+        );
+        assert!(
+            path_str.contains(CLI_VERSION),
+            "Expected path to contain CLI_VERSION '{}', got: {}",
+            CLI_VERSION,
+            path_str
+        );
+    }
+}
+
+/// Test that bundled CLI exists when the `bundled-cli` feature was used to build
+#[test]
+#[cfg(feature = "bundled-cli")]
+fn test_bundled_cli_exists() {
+    let path = claude_code_agent_sdk::version::bundled_cli_path()
+        .expect("Should have a bundled path on a system with a home directory");
+    assert!(
+        path.exists(),
+        "Bundled CLI should exist at: {} (built with bundled-cli feature)",
+        path.display()
+    );
+}
+
+/// End-to-end test: verify bundled CLI is executable and reports the expected version
+#[test]
+#[cfg(feature = "bundled-cli")]
+fn test_bundled_cli_version_matches() {
+    use claude_code_agent_sdk::CLI_VERSION;
+
+    let path = claude_code_agent_sdk::version::bundled_cli_path()
+        .expect("Should have a bundled path");
+
+    let output = std::process::Command::new(&path)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to execute bundled CLI at {}: {}", path.display(), e));
+
+    assert!(
+        output.status.success(),
+        "Bundled CLI exited with non-zero status"
+    );
+
+    let version_output = String::from_utf8_lossy(&output.stdout);
+    let version_line = version_output.trim();
+    assert!(
+        version_line.contains(CLI_VERSION),
+        "Bundled CLI version mismatch: output='{}', expected to contain '{}'",
+        version_line,
+        CLI_VERSION
+    );
 }

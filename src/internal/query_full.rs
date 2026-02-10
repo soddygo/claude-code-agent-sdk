@@ -179,11 +179,12 @@ impl QueryFull {
     }
 
 
-    /// Initialize with hooks
-    #[instrument(name = "claude.query_full.initialize", skip(self, hooks))]
+    /// Initialize with hooks and agents
+    #[instrument(name = "claude.query_full.initialize", skip(self, hooks, agents))]
     pub async fn initialize(
         &self,
         hooks: Option<HashMap<String, Vec<HookMatcher>>>,
+        agents: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
         debug!("Initializing query");
         if hooks.is_some() {
@@ -236,10 +237,17 @@ impl QueryFull {
         // Note: We don't need to tell CLI about can_use_tool callback explicitly.
         // The CLI knows to use control protocol for permission requests when
         // --permission-prompt-tool stdio is set (done automatically in client.rs)
-        let request = json!({
+        // Agents are sent in the initialize request body (not via CLI --agents flag)
+        // to avoid OS ARG_MAX limits with large agent definitions.
+        let mut request = json!({
             "subtype": "initialize",
             "hooks": if hooks_config.is_empty() { json!(null) } else { json!(hooks_config) }
         });
+
+        // Add agents to initialize request if provided
+        if let Some(agents_value) = agents {
+            request["agents"] = agents_value;
+        }
 
         let response = self.send_control_request(request).await?;
 
@@ -825,6 +833,18 @@ impl QueryFull {
     /// This includes information about available commands, output styles, and server capabilities.
     pub async fn get_initialization_result(&self) -> Option<serde_json::Value> {
         self.initialization_result.lock().await.clone()
+    }
+
+    /// Get current MCP server connection status
+    ///
+    /// Queries the Claude Code CLI for the live connection status of all
+    /// configured MCP servers.
+    pub async fn get_mcp_status(&self) -> Result<serde_json::Value> {
+        let request = json!({
+            "subtype": "mcp_status"
+        });
+
+        self.send_control_request(request).await
     }
 
     /// Handle SDK MCP request by routing to the appropriate server

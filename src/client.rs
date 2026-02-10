@@ -201,10 +201,14 @@ impl ClaudeClient {
                     let event_name = match event {
                         HookEvent::PreToolUse => "PreToolUse",
                         HookEvent::PostToolUse => "PostToolUse",
+                        HookEvent::PostToolUseFailure => "PostToolUseFailure",
                         HookEvent::UserPromptSubmit => "UserPromptSubmit",
                         HookEvent::Stop => "Stop",
                         HookEvent::SubagentStop => "SubagentStop",
                         HookEvent::PreCompact => "PreCompact",
+                        HookEvent::Notification => "Notification",
+                        HookEvent::SubagentStart => "SubagentStart",
+                        HookEvent::PermissionRequest => "PermissionRequest",
                     };
                     (event_name.to_string(), matchers.clone())
                 })
@@ -247,6 +251,15 @@ impl ClaudeClient {
         query_manager.set_hooks(hooks).await;
         query_manager.set_sdk_mcp_servers(sdk_mcp_servers).await;
         query_manager.set_can_use_tool(self.options.can_use_tool.clone()).await;
+
+        // Serialize agents to JSON Value for the initialize request body
+        // This avoids OS ARG_MAX limits from passing large agent definitions via CLI flags
+        if let Some(ref agents) = self.options.agents {
+            let agents_value = serde_json::to_value(agents).map_err(|e| {
+                ClaudeError::InvalidConfig(format!("Failed to serialize agents: {}", e))
+            })?;
+            query_manager.set_agents(Some(agents_value)).await;
+        }
 
         let query_manager = Arc::new(query_manager);
 
@@ -933,6 +946,51 @@ impl ClaudeClient {
             return None;
         };
         query.get_initialization_result().await
+    }
+
+    /// Get current MCP server connection status
+    ///
+    /// Queries the Claude Code CLI for the live connection status of all
+    /// configured MCP servers.
+    ///
+    /// This is analogous to Python's `client.get_mcp_status()`.
+    ///
+    /// # Returns
+    ///
+    /// Dictionary with MCP server status information. Contains a
+    /// `mcpServers` key with a list of server status objects, each having:
+    /// - `name`: Server name
+    /// - `status`: Connection status (`connected`, `pending`, `failed`,
+    ///   `needs-auth`, `disabled`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client is not connected or if the request fails.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use claude_code_agent_sdk::{ClaudeClient, ClaudeAgentOptions};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let mut client = ClaudeClient::new(ClaudeAgentOptions::default());
+    /// # client.connect().await?;
+    /// let status = client.get_mcp_status().await?;
+    /// println!("MCP status: {:?}", status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_mcp_status(&self) -> Result<serde_json::Value> {
+        let query_manager = self.query_manager.as_ref().ok_or_else(|| {
+            ClaudeError::InvalidConfig("Client not connected. Call connect() first.".to_string())
+        })?;
+
+        let query_id = self.current_query_id.as_ref().ok_or_else(|| {
+            ClaudeError::InvalidConfig("No active query. Call query() first.".to_string())
+        })?;
+
+        let query = query_manager.get_query(query_id)?;
+        query.get_mcp_status().await
     }
 
     /// Start a new session by switching to a different session ID

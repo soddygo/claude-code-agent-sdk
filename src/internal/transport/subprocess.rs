@@ -116,6 +116,17 @@ impl SubprocessTransport {
 
     /// Find the Claude CLI executable
     fn find_cli() -> Result<PathBuf> {
+        // Strategy 0 (bundled): Check bundled CLI path
+        // ~/.claude/sdk/bundled/{CLI_VERSION}/claude
+        // Always checked regardless of bundled-cli feature (path won't exist if not downloaded)
+        if let Some(bundled_path) = crate::version::bundled_cli_path()
+            && bundled_path.exists()
+            && bundled_path.is_file()
+        {
+            info!("Using bundled Claude CLI: {}", bundled_path.display());
+            return Ok(bundled_path);
+        }
+
         // Strategy 1: Try executing 'claude' directly from PATH
         // This is the most reliable method as it respects the shell's PATH resolution
         if let Ok(output) = std::process::Command::new("claude")
@@ -226,10 +237,8 @@ impl SubprocessTransport {
             "stream-json".to_string(),
         ];
 
-        // Only add --verbose if enabled
-        if self.options.verbose {
-            args.push("--verbose".to_string());
-        }
+        // Always add --verbose (matches Python SDK behavior which sends it unconditionally)
+        args.push("--verbose".to_string());
 
         // For streaming mode or content mode, enable stream-json input
         if matches!(
@@ -241,8 +250,8 @@ impl SubprocessTransport {
         }
 
         // Add system prompt
-        // Note: Python SDK behavior (lines 91-102 of subprocess_cli.py):
-        // - If None: skip
+        // Python SDK behavior (subprocess_cli.py):
+        // - If None: send --system-prompt "" to explicitly clear the default prompt
         // - If string: use --system-prompt
         // - If preset with append: use --append-system-prompt (NOT --system-prompt-preset)
         //   This relies on default Claude Code prompt and just appends to it
@@ -261,6 +270,11 @@ impl SubprocessTransport {
                     // Note: preset.preset field is ignored - CLI uses default prompt
                 }
             }
+        } else {
+            // When system_prompt is None, explicitly clear the default prompt
+            // This matches Python SDK behavior (subprocess_cli.py:170-171)
+            args.push("--system-prompt".to_string());
+            args.push(String::new());
         }
 
         // Add tools configuration
@@ -401,28 +415,26 @@ impl SubprocessTransport {
             args.push("--fork-session".to_string());
         }
 
-        // Add agent definitions
-        if let Some(ref agents) = self.options.agents
-            && !agents.is_empty()
-        {
-            let agents_json = serde_json::to_string(agents).unwrap_or_default();
-            args.push("--agents".to_string());
-            args.push(agents_json);
-        }
+        // Note: Agents are sent via the initialize request body, not via CLI flags.
+        // This avoids OS ARG_MAX limits with large agent definitions (matches Python SDK behavior).
 
         // Add setting sources
-        if let Some(ref sources) = self.options.setting_sources {
-            let sources_str: Vec<&str> = sources
+        // Always send --setting-sources, even as empty string when None,
+        // to prevent CLI from using default setting sources (matches Python SDK behavior)
+        let sources_str = match &self.options.setting_sources {
+            Some(sources) => sources
                 .iter()
                 .map(|s| match s {
                     crate::types::config::SettingSource::User => "user",
                     crate::types::config::SettingSource::Project => "project",
                     crate::types::config::SettingSource::Local => "local",
                 })
-                .collect();
-            args.push("--setting-sources".to_string());
-            args.push(sources_str.join(","));
-        }
+                .collect::<Vec<_>>()
+                .join(","),
+            None => String::new(),
+        };
+        args.push("--setting-sources".to_string());
+        args.push(sources_str);
 
         // Add plugins
         for plugin in &self.options.plugins {

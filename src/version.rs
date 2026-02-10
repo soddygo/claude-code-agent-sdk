@@ -8,6 +8,27 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Minimum required Claude Code CLI version
 pub const MIN_CLI_VERSION: &str = "2.0.0";
 
+/// Bundled Claude Code CLI version (build.rs downloads this version when `bundled-cli` feature is enabled)
+pub const CLI_VERSION: &str = "2.1.38";
+
+/// Bundled CLI storage directory (relative to home directory)
+pub(crate) const BUNDLED_CLI_DIR: &str = ".claude/sdk/bundled";
+
+/// Get the full path to the bundled CLI binary.
+///
+/// Returns `Some(path)` where path is `~/.claude/sdk/bundled/{CLI_VERSION}/claude` (or `claude.exe` on Windows).
+/// Returns `None` if the home directory cannot be determined.
+pub fn bundled_cli_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| {
+        let cli_name = if cfg!(target_os = "windows") {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+        home.join(BUNDLED_CLI_DIR).join(CLI_VERSION).join(cli_name)
+    })
+}
+
 /// Environment variable to skip version check
 pub const SKIP_VERSION_CHECK_ENV: &str = "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK";
 
@@ -105,5 +126,41 @@ mod tests {
         assert!(check_version("3.0.0"));
         assert!(!check_version("1.9.9"));
         assert!(!check_version("1.99.99"));
+    }
+
+    #[test]
+    fn test_cli_version_format() {
+        assert!(
+            parse_version(CLI_VERSION).is_some(),
+            "CLI_VERSION must be a valid semver string"
+        );
+    }
+
+    #[test]
+    fn test_cli_version_meets_minimum() {
+        assert!(
+            check_version(CLI_VERSION),
+            "CLI_VERSION ({}) must meet MIN_CLI_VERSION ({})",
+            CLI_VERSION,
+            MIN_CLI_VERSION
+        );
+    }
+
+    #[test]
+    fn test_bundled_cli_path_format() {
+        if let Some(path) = bundled_cli_path() {
+            let path_str = path.to_string_lossy();
+            assert!(
+                path_str.contains(".claude/sdk/bundled"),
+                "bundled path must contain '.claude/sdk/bundled': {}",
+                path_str
+            );
+            assert!(
+                path_str.contains(CLI_VERSION),
+                "bundled path must contain CLI_VERSION ({}): {}",
+                CLI_VERSION,
+                path_str
+            );
+        }
     }
 }

@@ -65,6 +65,9 @@ pub struct UserMessage {
     /// Parent tool use ID (if this is a tool result)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_tool_use_id: Option<String>,
+    /// Tool use result data
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_result: Option<serde_json::Value>,
     /// Additional fields
     #[serde(flatten)]
     pub extra: serde_json::Value,
@@ -769,5 +772,46 @@ mod tests {
         assert!(block.is_err());
         let err = block.unwrap_err().to_string();
         assert!(err.contains("exceeds maximum size"));
+    }
+
+    #[test]
+    fn test_user_message_with_tool_use_result() {
+        let json_str = r#"{
+            "type": "user",
+            "text": "result",
+            "tool_use_result": {"output": "success", "exit_code": 0}
+        }"#;
+
+        let msg: UserMessage = serde_json::from_str(json_str).unwrap();
+        assert!(msg.tool_use_result.is_some());
+        let result = msg.tool_use_result.unwrap();
+        assert_eq!(result["output"], "success");
+        assert_eq!(result["exit_code"], 0);
+    }
+
+    #[test]
+    fn test_user_message_without_tool_use_result() {
+        let json_str = r#"{
+            "type": "user",
+            "text": "Hello"
+        }"#;
+
+        let msg: UserMessage = serde_json::from_str(json_str).unwrap();
+        assert!(msg.tool_use_result.is_none());
+    }
+
+    #[test]
+    fn test_user_message_tool_use_result_serialization() {
+        let msg = UserMessage {
+            text: Some("test".to_string()),
+            content: None,
+            uuid: None,
+            parent_tool_use_id: None,
+            tool_use_result: Some(json!({"status": "ok"})),
+            extra: json!({}),
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["tool_use_result"]["status"], "ok");
     }
 }

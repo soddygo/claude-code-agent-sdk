@@ -139,8 +139,11 @@ pub struct ClaudeAgentOptions {
     /// Set to true to skip version compatibility check, saving about 100-500ms
     #[builder(default = false)]
     pub skip_version_check: bool,
-    /// Enable verbose CLI output (default: true)
-    /// Set to false to potentially improve throughput by reducing CLI logging overhead
+    /// Reserved — `--verbose` is always sent to the CLI unconditionally.
+    ///
+    /// The `--verbose` flag is required when using `--output-format stream-json`,
+    /// which is the SDK's default transport mode. This field is kept for
+    /// backwards compatibility but has no effect.
     #[builder(default = true)]
     pub verbose: bool,
     /// Efficiency tracking and hook injection configuration

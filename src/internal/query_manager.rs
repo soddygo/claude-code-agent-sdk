@@ -59,6 +59,8 @@ pub struct QueryManager {
     sdk_mcp_servers: Arc<Mutex<HashMap<String, McpSdkServerConfig>>>,
     can_use_tool: Arc<Mutex<Option<CanUseToolCallback>>>,
     control_request_timeout: Option<Duration>,
+    /// Agents to include in the initialize request body
+    agents: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 impl QueryManager {
@@ -110,6 +112,7 @@ impl QueryManager {
             sdk_mcp_servers: Arc::new(Mutex::new(HashMap::new())),
             can_use_tool: Arc::new(Mutex::new(None)),
             control_request_timeout: None,
+            agents: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -131,6 +134,11 @@ impl QueryManager {
     /// Set control request timeout for queries
     pub fn set_control_request_timeout(&mut self, timeout: Option<Duration>) {
         self.control_request_timeout = timeout;
+    }
+
+    /// Set agents to include in the initialize request body
+    pub async fn set_agents(&self, agents: Option<serde_json::Value>) {
+        *self.agents.lock().await = agents;
     }
 
     /// Create a new isolated query
@@ -193,9 +201,10 @@ impl QueryManager {
         // Start the background reader
         query.start().await?;
 
-        // Initialize with hooks
+        // Initialize with hooks and agents
         let hooks = self.hooks.lock().await.clone();
-        query.initialize(hooks).await?;
+        let agents = self.agents.lock().await.clone();
+        query.initialize(hooks, agents).await?;
 
         // Store in DashMap
         self.queries.insert(query_id.clone(), Arc::new(query));
