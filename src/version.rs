@@ -10,7 +10,7 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MIN_CLI_VERSION: &str = "2.0.0";
 
 /// Bundled Claude Code CLI version (build.rs downloads this version when `bundled-cli` feature is enabled)
-pub const CLI_VERSION: &str = "2.1.38";
+pub const CLI_VERSION: &str = "2.1.41";
 
 /// Bundled CLI storage directory (relative to home directory)
 pub(crate) const BUNDLED_CLI_DIR: &str = ".claude/sdk/bundled";
